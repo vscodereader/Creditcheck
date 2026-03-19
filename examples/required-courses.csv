@@ -1,0 +1,5 @@
+courseCode,name,credit,classification,isRequired,semesterText
+CSE101,컴퓨터개론,3,전공필수,true,1-1
+CSE102,C프로그래밍,3,전공필수,true,1-1
+CSE201,자료구조,3,전공필수,true,2-1
+CSE202,운영체제,3,전공필수,true,2-2

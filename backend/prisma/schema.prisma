@@ -1,0 +1,110 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model CurriculumSource {
+  id          String   @id @default(cuid())
+  title       String
+  category    String
+  year        Int?
+  sourceUrl   String   @unique
+  publishedAt DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  catalogs    CurriculumCatalog[]
+}
+
+model CurriculumCatalog {
+  id                     String                  @id @default(cuid())
+  year                   Int
+  major                  String
+  track                  String?
+  notes                  String?
+  sourceUrl              String?
+  sourceId               String?
+  createdAt              DateTime                @default(now())
+  updatedAt              DateTime                @updatedAt
+  source                 CurriculumSource?       @relation(fields: [sourceId], references: [id])
+  courses                RequiredCourse[]
+  graduationRequirements GraduationRequirement[]
+
+  @@index([year, major])
+}
+
+model RequiredCourse {
+  id               String            @id @default(cuid())
+  catalogId        String
+  courseCode       String?
+  name             String
+  credit           Int?
+  classification   String?
+  classification1  String?
+  classification2  String?
+  isRequired       Boolean           @default(true)
+  semesterText     String?
+  yearLevel        Int?
+  semesterOrder    Int?
+  sourceImageLabel String?
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+  catalog          CurriculumCatalog @relation(fields: [catalogId], references: [id], onDelete: Cascade)
+
+  @@index([catalogId])
+  @@index([courseCode])
+}
+
+model GraduationRequirement {
+  id        String            @id @default(cuid())
+  catalogId String
+  section   String
+  label     String
+  credits   Int?
+  theory    Int?
+  practice  Int?
+  sortOrder Int               @default(0)
+  createdAt DateTime          @default(now())
+  updatedAt DateTime          @updatedAt
+  catalog   CurriculumCatalog @relation(fields: [catalogId], references: [id], onDelete: Cascade)
+
+  @@index([catalogId])
+  @@index([section])
+}
+
+model CompletedCourseSet {
+  id          String            @id @default(cuid())
+  title       String
+  studentName String?
+  studentNo   String?
+  notes       String?
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+  courses     CompletedCourse[]
+}
+
+model CompletedCourse {
+  id               String             @id @default(cuid())
+  setId            String
+  yearTaken        Int?
+  termText         String?
+  courseCode       String?
+  name             String
+  classification   String?
+  classification1  String?
+  classification2  String?
+  credit           Int?
+  gradeText        String?
+  professor        String?
+  sourceImageLabel String?
+  rawText          String?
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
+  set              CompletedCourseSet @relation(fields: [setId], references: [id], onDelete: Cascade)
+
+  @@index([setId])
+  @@index([courseCode])
+}
