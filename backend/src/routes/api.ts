@@ -465,12 +465,18 @@ function normalizeAiImages(images: AiImageInput[] | undefined): AiImageInput[] {
     .filter((image) => image.dataUrl.startsWith('data:image/'));
 }
 
-function normalizeRequiredCourse(course: Record<string, unknown>): CourseInput & {
+function normalizeRequiredCourse(course: Record<string, unknown>): {
+  courseCode?: string | null;
+  name: string;
+  credit?: number | null;
+  classification?: string | null;
+  classification1?: string | null;
+  classification2?: string | null;
+  isRequired?: boolean;
+  semesterText?: string | null;
   yearLevel?: number | null;
   semesterOrder?: number | null;
   sourceImageLabel?: string | null;
-  classification1?: string | null;
-  classification2?: string | null;
 } {
   const classification1 = stringOrNull(course.classification1);
   const classification2 = stringOrNull(course.classification2);
@@ -487,7 +493,7 @@ function normalizeRequiredCourse(course: Record<string, unknown>): CourseInput &
     classification,
     classification1,
     classification2,
-    isRequired: toBoolean(course.isRequired, true),
+    isRequired: toBoolean(course.isRequired, true) ?? true,
     semesterText: stringOrNull(course.semesterText ?? course.semester),
     yearLevel: toInt(course.yearLevel),
     semesterOrder: toInt(course.semesterOrder),

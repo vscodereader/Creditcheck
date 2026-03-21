@@ -7,8 +7,8 @@ export type AiImageInput = {
 };
 
 export type CurriculumCourse = {
-  imageIndex?: number | null;
-  appearanceOrder?: number | null;
+  imageIndex: number | null;
+  appearanceOrder: number | null;
   yearLevel: number | null;
   semesterOrder: number | null;
   classification: string;
@@ -220,8 +220,7 @@ function normalizeCurriculumPayload(value: unknown): { courses: CurriculumCourse
   const obj = (value && typeof value === 'object' ? value : {}) as Record<string, unknown>;
   const rawCourses = Array.isArray(obj.courses) ? obj.courses : [];
 
-  const courses: CurriculumCourse[] = rawCourses
-    .map((item) => {
+  const mappedCourses: Array<CurriculumCourse | null> = rawCourses.map((item) => {
       const row = (item && typeof item === 'object' ? item : {}) as Record<string, unknown>;
 
       const classification = stringValue(row.classification);
@@ -237,7 +236,7 @@ function normalizeCurriculumPayload(value: unknown): { courses: CurriculumCourse
       const name = stringValue(row.name);
       if (!name) return null;
 
-      return {
+      const course: CurriculumCourse = {
         imageIndex: toIntOrNull(row.imageIndex),
         appearanceOrder: toIntOrNull(row.appearanceOrder),
         yearLevel: toIntOrNull(row.yearLevel),
@@ -247,9 +246,14 @@ function normalizeCurriculumPayload(value: unknown): { courses: CurriculumCourse
         classification2,
         name,
         credit: toIntOrNull(row.credit)
-      } satisfies CurriculumCourse;
-    })
-    .filter((row): row is CurriculumCourse => Boolean(row));
+      };
+
+      return course;
+    });
+
+    const courses: CurriculumCourse[] = mappedCourses.filter(
+      (row): row is CurriculumCourse => row !== null
+    );
 
   const rawGrad = (obj.graduationCredits && typeof obj.graduationCredits === 'object'
     ? obj.graduationCredits
@@ -271,8 +275,7 @@ function normalizeCompletedPayload(value: unknown): { courses: CompletedCourseAi
   const obj = (value && typeof value === 'object' ? value : {}) as Record<string, unknown>;
   const rawCourses = Array.isArray(obj.courses) ? obj.courses : [];
 
-  const courses: CompletedCourseAi[] = rawCourses
-    .map((item) => {
+    const mappedCourses: Array<CompletedCourseAi | null> = rawCourses.map((item) => {
       const row = (item && typeof item === 'object' ? item : {}) as Record<string, unknown>;
 
       const classification = stringValue(row.classification);
@@ -288,7 +291,7 @@ function normalizeCompletedPayload(value: unknown): { courses: CompletedCourseAi
       const name = stringValue(row.name);
       if (!name) return null;
 
-      return {
+      const course: CompletedCourseAi = {
         yearTaken: toIntOrNull(row.yearTaken),
         termText: stringValue(row.termText),
         classification: combineClassification(classification1, classification2, classification),
@@ -298,9 +301,14 @@ function normalizeCompletedPayload(value: unknown): { courses: CompletedCourseAi
         credit: toIntOrNull(row.credit),
         gradeText: stringValue(row.gradeText),
         professor: stringValue(row.professor)
-      } satisfies CompletedCourseAi;
-    })
-    .filter((row): row is CompletedCourseAi => Boolean(row));
+      };
+
+      return course;
+    });
+
+    const courses: CompletedCourseAi[] = mappedCourses.filter(
+      (row): row is CompletedCourseAi => row !== null
+    );
 
   return { courses };
 }

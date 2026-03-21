@@ -6,6 +6,7 @@ export type CourseInput = {
   classification?: string | null;
   classification1?: string | null;
   classification2?: string | null;
+  isRequired?: boolean | null;
   yearLevel?: number | null;
   semesterOrder?: number | null;
   yearTaken?: number | null;
@@ -257,10 +258,11 @@ function buildProgressBucket(args: {
     headline = `${earnedCredits} / -`;
   } else {
     headline = `${earnedCredits} / ${requiredCredits}`;
-    subline =
-      remainingCredits > 0
-        ? `${args.shortLabel} ${remainingCredits}학점 더 들으셔야 해요!`
-        : `${args.shortLabel} 충족 완료!`;
+    if (remainingCredits !== null && remainingCredits > 0) {
+    subline = `${args.shortLabel} ${remainingCredits}학점 더 들으셔야 해요!`;
+    } else {
+      subline = `${args.shortLabel} 충족 완료!`;
+    }
   }
 
   return {
