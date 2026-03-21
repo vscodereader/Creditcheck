@@ -1,5 +1,5 @@
-import OpenAI from 'openai';
 import { appendUsageRecord, buildUsageRecord } from './usageMeter.js';
+import OpenAI from 'openai';
 
 export type AiImageInput = {
   fileName: string;
@@ -7,6 +7,8 @@ export type AiImageInput = {
 };
 
 export type CurriculumCourse = {
+  imageIndex?: number | null;
+  appearanceOrder?: number | null;
   yearLevel: number | null;
   semesterOrder: number | null;
   classification: string;
@@ -165,18 +167,14 @@ function extractCurriculumClass2(value: string): string {
   return normalized;
 }
 
-function splitClassification(
-  value: string,
-  mode: 'curriculum' | 'completed' = 'curriculum'
-): { classification1: string; classification2: string } {
+function splitClassification(value: string, mode: 'curriculum' | 'completed' = 'curriculum'): {
+  classification1: string;
+  classification2: string;
+} {
   const raw = value.trim();
   if (!raw) return { classification1: '', classification2: '' };
 
-  const slashParts = raw
-    .split('/')
-    .map((part) => part.trim())
-    .filter(Boolean);
-
+  const slashParts = raw.split('/').map((part) => part.trim()).filter(Boolean);
   if (slashParts.length >= 2) {
     return {
       classification1:
@@ -188,87 +186,70 @@ function splitClassification(
   }
 
   return {
-    classification1: mode === 'curriculum' ? extractCurriculumClass1(raw) : normalizeClassification1(raw),
-    classification2: normalizeClassification2(raw)
+    classification1:
+      mode === 'curriculum'
+        ? extractCurriculumClass1(raw)
+        : normalizeClassification1(raw),
+    classification2: ''
   };
 }
 
-function dedupeCurriculumCourses(courses: CurriculumCourse[]): CurriculumCourse[] {
-  const seen = new Set<string>();
-  const results: CurriculumCourse[] = [];
+function sortCurriculumCourses(courses: CurriculumCourse[]): CurriculumCourse[] {
+  return [...courses].sort((a, b) => {
+    const aYear = a.yearLevel ?? 999;
+    const bYear = b.yearLevel ?? 999;
+    if (aYear !== bYear) return aYear - bYear;
 
-  for (const course of courses) {
-    const key = [
-      course.yearLevel ?? '',
-      course.semesterOrder ?? '',
-      course.classification1,
-      course.classification2,
-      course.name,
-      course.credit ?? ''
-    ]
-      .join('|')
-      .toLowerCase();
+    const aSemester = a.semesterOrder ?? 999;
+    const bSemester = b.semesterOrder ?? 999;
+    if (aSemester !== bSemester) return aSemester - bSemester;
 
-    if (!course.name || seen.has(key)) continue;
-    seen.add(key);
-    results.push(course);
-  }
+    const aImage = a.imageIndex ?? 999;
+    const bImage = b.imageIndex ?? 999;
+    if (aImage !== bImage) return aImage - bImage;
 
-  return results;
+    const aOrder = a.appearanceOrder ?? 9999;
+    const bOrder = b.appearanceOrder ?? 9999;
+    if (aOrder !== bOrder) return aOrder - bOrder;
+
+    return a.name.localeCompare(b.name, 'ko');
+  });
 }
 
-function dedupeCompletedCourses(courses: CompletedCourseAi[]): CompletedCourseAi[] {
-  const seen = new Set<string>();
-  const results: CompletedCourseAi[] = [];
-
-  for (const course of courses) {
-    const key = [
-      course.yearTaken ?? '',
-      course.termText,
-      course.classification1,
-      course.classification2,
-      course.name,
-      course.credit ?? '',
-      course.gradeText,
-      course.professor
-    ]
-      .join('|')
-      .toLowerCase();
-
-    if (!course.name || seen.has(key)) continue;
-    seen.add(key);
-    results.push(course);
-  }
-
-  return results;
-}
-
-function normalizeCurriculumPayload(value: unknown): {
-  courses: CurriculumCourse[];
-  graduationCredits: GraduationCredits;
-} {
+function normalizeCurriculumPayload(value: unknown): { courses: CurriculumCourse[]; graduationCredits: GraduationCredits } {
   const obj = (value && typeof value === 'object' ? value : {}) as Record<string, unknown>;
   const rawCourses = Array.isArray(obj.courses) ? obj.courses : [];
 
-  const courses = dedupeCurriculumCourses(
-    rawCourses.map((item) => {
+  const courses: CurriculumCourse[] = rawCourses
+    .map((item) => {
       const row = (item && typeof item === 'object' ? item : {}) as Record<string, unknown>;
+
       const classification = stringValue(row.classification);
       const parts = splitClassification(classification, 'curriculum');
-      const classification1 = normalizeClassification1(stringValue(row.classification1) || parts.classification1);
-      const classification2 = normalizeClassification2(stringValue(row.classification2) || parts.classification2);
+
+      const classification1 = normalizeClassification1(
+        stringValue(row.classification1) || parts.classification1
+      );
+      const classification2 = normalizeClassification2(
+        stringValue(row.classification2) || parts.classification2
+      );
+
+      const name = stringValue(row.name);
+      if (!name) return null;
 
       return {
+        imageIndex: toIntOrNull(row.imageIndex),
+        appearanceOrder: toIntOrNull(row.appearanceOrder),
         yearLevel: toIntOrNull(row.yearLevel),
         semesterOrder: toIntOrNull(row.semesterOrder),
         classification: combineClassification(classification1, classification2, classification),
         classification1,
         classification2,
-        name: stringValue(row.name),
+        name,
         credit: toIntOrNull(row.credit)
       } satisfies CurriculumCourse;
     })
-  );
+    .filter((row): row is CurriculumCourse => Boolean(row));
 
   const rawGrad = (obj.graduationCredits && typeof obj.graduationCredits === 'object'
     ? obj.graduationCredits
@@ -280,7 +261,7 @@ function normalizeCurriculumPayload(value: unknown): {
     계열교양: toIntOrNull(rawGrad['계열교양']),
     전공필수: toIntOrNull(rawGrad['전공필수']),
     전공선택: toIntOrNull(rawGrad['전공선택']),
-    총학점: toIntOrNull(rawGrad['총학점'])
+    총학점: toIntOrNull(rawGrad['총학점'] ?? rawGrad['총졸업학점'])
   };
 
   return { courses, graduationCredits };
@@ -290,13 +271,22 @@ function normalizeCompletedPayload(value: unknown): { courses: CompletedCourseAi
   const obj = (value && typeof value === 'object' ? value : {}) as Record<string, unknown>;
   const rawCourses = Array.isArray(obj.courses) ? obj.courses : [];
 
-  const courses = dedupeCompletedCourses(
-    rawCourses.map((item) => {
+  const courses: CompletedCourseAi[] = rawCourses
+    .map((item) => {
       const row = (item && typeof item === 'object' ? item : {}) as Record<string, unknown>;
+
       const classification = stringValue(row.classification);
       const parts = splitClassification(classification, 'completed');
-      const classification1 = normalizeClassification1(stringValue(row.classification1) || parts.classification1);
-      const classification2 = normalizeClassification2(stringValue(row.classification2) || parts.classification2);
+
+      const classification1 = normalizeClassification1(
+        stringValue(row.classification1) || parts.classification1
+      );
+      const classification2 = normalizeClassification2(
+        stringValue(row.classification2) || parts.classification2
+      );
+
+      const name = stringValue(row.name);
+      if (!name) return null;
 
       return {
         yearTaken: toIntOrNull(row.yearTaken),
@@ -304,22 +294,18 @@ function normalizeCompletedPayload(value: unknown): { courses: CompletedCourseAi
         classification: combineClassification(classification1, classification2, classification),
         classification1,
         classification2,
-        name: stringValue(row.name),
+        name,
         credit: toIntOrNull(row.credit),
         gradeText: stringValue(row.gradeText),
         professor: stringValue(row.professor)
       } satisfies CompletedCourseAi;
     })
-  );
+    .filter((row): row is CompletedCourseAi => Boolean(row));
 
   return { courses };
 }
 
-async function runVisionPrompt(
-  prompt: string,
-  images: AiImageInput[],
-  route: '/api/ai-ocr/curriculum' | '/api/ai-ocr/completed'
-): Promise<string> {
+async function runVisionPrompt(route: string, prompt: string, images: AiImageInput[]): Promise<string> {
   const client = getClient();
   const model = getModel();
 
@@ -343,54 +329,76 @@ async function runVisionPrompt(
   const usageRecord = buildUsageRecord({
     route,
     model,
-    usage: response.usage as {
-      input_tokens?: number;
-      output_tokens?: number;
-      total_tokens?: number;
-      input_tokens_details?: { cached_tokens?: number };
-      output_tokens_details?: { reasoning_tokens?: number };
-    } | null
+    usage: response.usage
   });
 
   appendUsageRecord(usageRecord);
 
   console.log(
-    `[OpenAI Usage] route=${usageRecord.route} model=${usageRecord.model} input=${usageRecord.inputTokens} output=${usageRecord.outputTokens} total=${usageRecord.totalTokens} reasoning=${usageRecord.reasoningTokens} estimatedUsd=$${usageRecord.estimatedUsd.toFixed(6)}`
+    `[OpenAI Usage] route=${usageRecord.route} model=${usageRecord.model} input=${usageRecord.inputTokens} output=${usageRecord.outputTokens} total=${usageRecord.totalTokens} estimatedUsd=$${usageRecord.estimatedUsd.toFixed(6)}`
   );
 
   return response.output_text ?? '';
 }
 
-export async function analyzeCurriculumImages(args: {
-  images: AiImageInput[];
+function buildCurriculumCoursePrompt(args: {
   year?: number | null;
   major?: string | null;
-  mode: 'courses' | 'graduation' | 'both';
-}): Promise<{ courses: CurriculumCourse[]; graduationCredits: GraduationCredits; rawText: string }> {
+  imageIndex: number;
+}): string {
   const context = `${args.year ? `기준 연도: ${args.year}\n` : ''}${args.major ? `전공명: ${args.major}\n` : ''}`;
 
-  const prompt = `${context}
-너는 한국 대학교 전공교육과정표를 구조화하는 추출기다.
-입력은 가천대학교 요람 스크린샷이다.
-반드시 유효한 JSON만 출력하고, 설명 문장이나 코드펜스는 절대 넣지 마라.
+  return `${context}
+너는 가천대학교 전공교육과정표 1장만 읽는 구조화 추출기다.
+반드시 유효한 JSON만 출력하고 설명 문장, 코드펜스, 주석은 절대 넣지 마라.
 
-공통 규칙:
-- 표의 소계, 합계 행은 courses에 넣지 마라.
-- 학점은 반드시 '학점' 열 값만 사용하고, 이론/실습 숫자는 버려라.
-- 과목명은 가능한 원문 그대로 복원하라.
-- 값이 안 보이면 추측하지 말고 null 또는 빈 문자열로 남겨라.
-- 이미지가 여러 장이면 중복 과목은 한 번만 남겨라.
-- 같은 이미지 안에 1학기와 2학기가 함께 있으면 섞지 말고 각 과목에 올바른 학년/학기를 넣어라.
-- 한 블록의 머리글에만 학년/학기가 보이면 그 블록의 모든 과목에 같은 값을 채워라.
-- 이수구분은 가능한 아래 형식으로 나눠라. 줄임말이 보이면 전체 이름으로 복원하라. 예: 전필→전공필수, 전선→전공선택, 융교→융합교양, 기초→기초교양, 계교→계열교양.
-  - classification1: 기초교양, 융합교양, 계열교양, 전공필수, 전공선택 중 하나
-  - classification2: 인필, 인선 또는 빈 문자열
-- classification에는 classification1/classification2를 합친 값을 넣어라. 예: 계열교양/인필
+이 이미지는 "한 장"이다.
+다른 이미지와 절대 섞지 마라.
+파일 업로드 순서나 다른 이미지의 학년/학기를 절대 참고하지 마라.
+오직 현재 이미지 안에서만 판단하라.
+
+현재 이미지 번호:
+${args.imageIndex}
+
+이 표의 구조는 아래와 같다.
+- 1열: 학년
+- 2열: 왼쪽 블록 학기
+- 3열: 왼쪽 블록 이수구분
+- 4열: 왼쪽 블록 교과목명
+- 5열: 왼쪽 블록 학점
+- 6열, 7열: 이론/실습 → 무시
+- 8열: 오른쪽 블록 학기
+- 9열: 오른쪽 블록 이수구분
+- 10열: 오른쪽 블록 교과목명
+- 11열: 오른쪽 블록 학점
+- 12열, 13열: 이론/실습 → 무시
+
+중요 규칙:
+1. 반드시 1열의 학년은 "현재 이미지 안의 값만" 사용한다.
+2. 오른쪽 블록(8~11열)의 학년은 반드시 같은 이미지의 1열 학년을 사용한다.
+3. 왼쪽 블록은 2열 학기, 오른쪽 블록은 8열 학기를 사용한다.
+4. 학년/학기 셀이 병합되어 비어 보이면, 같은 이미지 같은 블록에서 위의 값을 이어받아 채운다.
+5. 소계 행은 절대 courses에 넣지 마라.
+6. 사진에 없는 과목을 상상해서 만들지 마라.
+7. 같은 이름이 실제 사진에 두 번 있으면 두 줄 모두 남겨라. 중복 제거하지 마라.
+8. 출력 순서는 사진에 보이는 순서 그대로 유지하라.
+   - 먼저 왼쪽 블록 위에서 아래로
+   - 그 다음 오른쪽 블록 위에서 아래로
+9. 학점은 반드시 학점 열(5열 또는 11열)만 사용하고, 이론/실습 숫자는 버려라.
+10. 이수구분은 아래처럼 분리하라.
+   - classification1: 기초교양, 융합교양, 계열교양, 전공필수, 전공선택 중 하나
+   - classification2: 인필, 인선 또는 빈 문자열
+11. 예시:
+   - 계열교양/인필 → classification1=계열교양, classification2=인필
+   - 기초교양 → classification1=기초교양, classification2=""
+12. 교과목명은 가능한 원문 그대로 적어라.
 
 출력 형식:
 {
   "courses": [
     {
+      "imageIndex": ${args.imageIndex},
+      "appearanceOrder": 1,
       "yearLevel": 1,
       "semesterOrder": 1,
       "classification": "계열교양/인필",
@@ -401,6 +409,43 @@ export async function analyzeCurriculumImages(args: {
     }
   ],
   "graduationCredits": {
+    "기초교양": null,
+    "융합교양": null,
+    "계열교양": null,
+    "전공필수": null,
+    "전공선택": null,
+    "총학점": null
+  }
+}`.trim();
+}
+
+function buildGraduationPrompt(args: {
+  year?: number | null;
+  major?: string | null;
+}): string {
+  const context = `${args.year ? `기준 연도: ${args.year}\n` : ''}${args.major ? `전공명: ${args.major}\n` : ''}`;
+
+  return `${context}
+너는 가천대학교 졸업이수학점 표를 읽는 구조화 추출기다.
+반드시 유효한 JSON만 출력하고 설명 문장, 코드펜스, 주석은 절대 넣지 마라.
+
+규칙:
+1. 읽어야 하는 항목은 아래 6개뿐이다.
+   - 기초교양
+   - 융합교양
+   - 계열교양
+   - 전공필수
+   - 전공선택
+   - 총학점
+2. 표의 병합 셀, 제목 셀, "졸업이수학점" 같은 큰 제목은 무시해라.
+3. "총 졸업학점"이라고 적혀 있어도 결과 키는 반드시 "총학점"으로 넣어라.
+4. 숫자가 안 보이면 null로 넣어라.
+5. 과목 정보는 절대 추출하지 마라.
+
+출력 형식:
+{
+  "courses": [],
+  "graduationCredits": {
     "기초교양": 17,
     "융합교양": 11,
     "계열교양": 24,
@@ -408,25 +453,91 @@ export async function analyzeCurriculumImages(args: {
     "전공선택": 51,
     "총학점": 130
   }
+}`.trim();
 }
 
-현재 작업 모드: ${args.mode}
-- mode가 courses면 courses만 최대한 채우고 graduationCredits는 모두 null로 둬라.
-- mode가 graduation이면 graduationCredits만 최대한 채우고 courses는 빈 배열로 둬라.
-- mode가 both면 둘 다 채워라.`.trim();
-
-  const rawText = await runVisionPrompt(prompt, args.images, '/api/ai-ocr/curriculum');
-  const parsed = normalizeCurriculumPayload(extractJson(rawText));
-
+export async function analyzeCurriculumImages(args: {
+  images: AiImageInput[];
+  year?: number | null;
+  major?: string | null;
+  mode: 'courses' | 'graduation' | 'both';
+}): Promise<{ courses: CurriculumCourse[]; graduationCredits: GraduationCredits; rawText: string }> {
   if (args.mode === 'courses') {
-    return { courses: parsed.courses, graduationCredits: defaultGraduationCredits(), rawText };
+    const allCourses: CurriculumCourse[] = [];
+    const rawTexts: string[] = [];
+
+    for (let i = 0; i < args.images.length; i += 1) {
+      const image = args.images[i];
+      const prompt = buildCurriculumCoursePrompt({
+        year: args.year,
+        major: args.major,
+        imageIndex: i + 1
+      });
+
+      const rawText = await runVisionPrompt('/api/ai-ocr/curriculum', prompt, [image]);
+      rawTexts.push(`### ${image.fileName}\n${rawText}`);
+
+      const parsed = normalizeCurriculumPayload(extractJson(rawText));
+      allCourses.push(...parsed.courses);
+    }
+
+    return {
+      courses: sortCurriculumCourses(allCourses),
+      graduationCredits: defaultGraduationCredits(),
+      rawText: rawTexts.join('\n\n')
+    };
   }
 
   if (args.mode === 'graduation') {
-    return { courses: [], graduationCredits: parsed.graduationCredits, rawText };
+    let merged = defaultGraduationCredits();
+    const rawTexts: string[] = [];
+
+    for (const image of args.images) {
+      const prompt = buildGraduationPrompt({
+        year: args.year,
+        major: args.major
+      });
+
+      const rawText = await runVisionPrompt('/api/ai-ocr/curriculum', prompt, [image]);
+      rawTexts.push(`### ${image.fileName}\n${rawText}`);
+
+      const parsed = normalizeCurriculumPayload(extractJson(rawText));
+      merged = {
+        기초교양: merged.기초교양 ?? parsed.graduationCredits.기초교양,
+        융합교양: merged.융합교양 ?? parsed.graduationCredits.융합교양,
+        계열교양: merged.계열교양 ?? parsed.graduationCredits.계열교양,
+        전공필수: merged.전공필수 ?? parsed.graduationCredits.전공필수,
+        전공선택: merged.전공선택 ?? parsed.graduationCredits.전공선택,
+        총학점: merged.총학점 ?? parsed.graduationCredits.총학점
+      };
+    }
+
+    return {
+      courses: [],
+      graduationCredits: merged,
+      rawText: rawTexts.join('\n\n')
+    };
   }
 
-  return { ...parsed, rawText };
+  const coursePart = await analyzeCurriculumImages({
+    images: args.images,
+    year: args.year,
+    major: args.major,
+    mode: 'courses'
+  });
+
+  const graduationPart = await analyzeCurriculumImages({
+    images: args.images,
+    year: args.year,
+    major: args.major,
+    mode: 'graduation'
+  });
+
+  return {
+    courses: coursePart.courses,
+    graduationCredits: graduationPart.graduationCredits,
+    rawText: `${coursePart.rawText}\n\n${graduationPart.rawText}`
+  };
 }
 
 export async function analyzeCompletedImages(args: {
@@ -440,10 +551,11 @@ export async function analyzeCompletedImages(args: {
 - 과목 하나당 배열 원소 하나로 출력하라.
 - 연도, 학기, 이수구분, 교과목명, 학점, 성적, 교수명을 읽어라.
 - 이수구분이 계열교양/인필 같은 형태면 classification1, classification2로 나눠라.
-- 줄임말을 보면 반드시 전체 이름으로 바꿔라. 예: 교필→교양필수, 교선→교양선택, 일선→일반선택, 전선→전공선택, 전필→전공필수, 융교→융합교양, 기초→기초교양, 계교→계열교양.
+- 줄임말을 보면 반드시 전체 이름으로 바꿔라.
+  예: 교필→교양필수, 교선→교양선택, 일선→일반선택, 전선→전공선택, 전필→전공필수, 융교→융합교양, 기초→기초교양, 계교→계열교양
 - 값이 보이지 않으면 추측하지 말고 null 또는 빈 문자열로 남겨라.
-- 중복된 행은 한 번만 남겨라.
 - 성적은 A+, A0, B+, B0, C+, C0, D+, D0, F, P, NP 등 원문에 가깝게 적어라.
+- 중복 제거하지 마라.
 
 출력 형식:
 {
@@ -462,7 +574,7 @@ export async function analyzeCompletedImages(args: {
   ]
 }`.trim();
 
-  const rawText = await runVisionPrompt(prompt, args.images, '/api/ai-ocr/completed');
+  const rawText = await runVisionPrompt('/api/ai-ocr/completed', prompt, args.images);
   const parsed = normalizeCompletedPayload(extractJson(rawText));
   return { ...parsed, rawText };
 }

@@ -101,8 +101,9 @@ export function normalizeClassification1(value: string): string {
 
 export function normalizeClassification2(value: string): string {
   const raw = value.trim();
-  if (!raw) return '';
-  return classification2Aliases[raw] ?? raw;
+  if (raw === '인필') return '인필';
+  if (raw === '인선') return '인선';
+  return '';
 }
 
 export function combineClassification(classification1: string, classification2: string): string {
@@ -112,11 +113,18 @@ export function combineClassification(classification1: string, classification2: 
   return first;
 }
 
-export function splitCurriculumClassification(rawValue: string): { classification1: string; classification2: string } {
+export function splitCurriculumClassification(rawValue: string): {
+  classification1: string;
+  classification2: string;
+} {
   const raw = rawValue.trim();
   if (!raw) return { classification1: '', classification2: '' };
 
-  const slashParts = raw.split('/').map((part) => part.trim()).filter(Boolean);
+  const slashParts = raw
+    .split('/')
+    .map((part) => part.trim())
+    .filter(Boolean);
+
   if (slashParts.length >= 2) {
     return {
       classification1: normalizeCurriculumClassification1(slashParts[0]),
@@ -124,21 +132,39 @@ export function splitCurriculumClassification(rawValue: string): { classificatio
     };
   }
 
-  const normalized1 = normalizeCurriculumClassification1(raw);
   return {
-    classification1: normalized1,
-    classification2: normalized1 === raw ? normalizeClassification2(raw) : ''
+    classification1: normalizeCurriculumClassification1(raw),
+    classification2: ''
   };
 }
 
-export function splitFreeClassification(rawValue: string): { classification1: string; classification2: string } {
-  const raw = rawValue.trim();
-  if (!raw) return { classification1: '', classification2: '' };
-  const slashParts = raw.split('/').map((part) => part.trim()).filter(Boolean);
-  if (slashParts.length >= 2) {
-    return { classification1: normalizeClassification1(slashParts[0]), classification2: normalizeClassification2(slashParts[1]) };
+export function splitFreeClassification(value: string): {
+  classification1: string;
+  classification2: string;
+} {
+  const raw = value.trim();
+  if (!raw) {
+    return { classification1: '', classification2: '' };
   }
-  return { classification1: normalizeClassification1(raw), classification2: normalizeClassification2(raw) };
+
+  const parts = raw
+    .split('/')
+    .map((part) => part.trim())
+    .filter(Boolean);
+
+  const classification1 = parts[0] ?? raw;
+  const classification2Raw = parts[1] ?? '';
+
+  const normalizedClass1 = normalizeClassification1(classification1);
+  const normalizedClass2 =
+    classification2Raw === '인필' || classification2Raw === '인선'
+      ? classification2Raw
+      : '';
+
+  return {
+    classification1: normalizedClass1,
+    classification2: normalizedClass2
+  };
 }
 
 export function formatCourseText(rows: RequiredCourseRow[]): string {

@@ -5,10 +5,19 @@ import morgan from 'morgan';
 import apiRouter from './routes/api.js';
 
 const app = express();
-const port = Number(process.env.PORT ?? 4000);
-const clientUrl = process.env.CLIENT_URL ?? 'http://localhost:5173';
 
-app.use(cors({ origin: [clientUrl, 'http://localhost:5173'], credentials: false }));
+const PORT = Number(process.env.PORT ?? 4000);
+const CLIENT_URL = process.env.CLIENT_URL ?? 'http://localhost:5173';
+
+const allowedOrigins = [CLIENT_URL, 'http://localhost:5173'];
+
+app.use(
+  cors({
+    origin: allowedOrigins,
+    credentials: false
+  })
+);
+
 app.use(express.json({ limit: '35mb' }));
 app.use(morgan('dev'));
 
@@ -35,6 +44,6 @@ app.use((err: unknown, _req: express.Request, res: express.Response, _next: expr
   res.status(500).json({ message });
 });
 
-app.listen(port, () => {
-  console.log(`API 서버 실행 중: http://localhost:${port}`);
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`API 서버 실행 중: port ${PORT}`);
 });

@@ -1,4 +1,4 @@
-import { type Dispatch, type SetStateAction, useEffect, useMemo, useState } from 'react';
+import { type Dispatch, type SetStateAction, useEffect, useMemo, useRef, useState } from 'react';
 import {
   combineClassification,
   completedClassification1Options,
@@ -26,7 +26,8 @@ import {
   type RequiredCourseRow
 } from './ocrUtils';
 
-const API_BASE = 'http://localhost:4000/api';
+const API_BASE = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:4000/api';
+const SOURCE_PAGE_SIZE = 5;
 
 type SourceItem = {
   id: string;
@@ -48,32 +49,84 @@ type CompletedSetItem = {
   studentName?: string | null;
 };
 
-type CompareCourseRow = {
+type CatalogDetailResponse = {
   id: string;
-  sourceCourseId?: string | null;
-  yearLabel: string;
-  termLabel: string;
+  year: number;
+  major: string;
+  sourceId?: string | null;
+  sourceUrl?: string | null;
+  courses: Array<{
+    yearLevel: number | null;
+    semesterOrder: number | null;
+    classification1?: string | null;
+    classification2?: string | null;
+    name: string;
+    credit: number | null;
+  }>;
+  graduationRequirements: Array<{
+    label: string;
+    credits: number | null;
+  }>;
+};
+
+type CompletedSetDetailResponse = {
+  id: string;
+  title: string;
+  studentName?: string | null;
+  studentNo?: string | null;
+  courses: Array<{
+    yearTaken: number | null;
+    termText: string;
+    classification1?: string | null;
+    classification2?: string | null;
+    name: string;
+    credit: number | null;
+    gradeText: string;
+    professor: string;
+  }>;
+};
+
+type CompareTableRow = {
+  id?: string;
+  yearText: string;
+  termText: string;
   classification1: string;
   classification2: string;
   name: string;
   credit: number | null;
   gradeText: string;
   professor: string;
-  matchedBy?: 'courseCode' | 'courseName';
+};
+
+type CompareBucket = {
+  title: string;
+  headline: string;
+  subline: string;
+  earnedCredits: number;
+  requiredCredits: number | null;
+  remainingCredits: number | null;
+  rows: CompareTableRow[];
 };
 
 type CompareResponse = {
   summary: {
-    coreRequiredCourses: number;
-    matchedCoreCourses: number;
-    missingCoreCourses: number;
-    matchedSelectiveCourses: number;
-    extraCompletedCourses: number;
+    earnedCredits: number;
+    requiredCredits: number | null;
+    headline: string;
+    expressionText: string;
   };
-  matchedCore: CompareCourseRow[];
-  missingCore: CompareCourseRow[];
-  matchedSelective: CompareCourseRow[];
-  extraCompleted: CompareCourseRow[];
+  buckets: {
+    majorCoreLiberal: CompareBucket;
+    majorRequired: CompareBucket;
+    majorSelective: CompareBucket;
+    basicLiberal: CompareBucket;
+    fusionLiberal: CompareBucket;
+    missing: CompareBucket;
+    extraLiberal: CompareBucket;
+    extraMajorRequired: CompareBucket;
+    extraMajorSelective: CompareBucket;
+    extraOther: CompareBucket;
+  };
 };
 
 type CurriculumAiResponse = {
@@ -119,9 +172,57 @@ type CellCoord<Row extends Record<string, unknown>> = {
   key: Extract<keyof Row, string>;
 };
 
+function requiredRowSortValue(row: RequiredCourseRow): [number, number, string, string] {
+  const year = typeof row.yearLevel === 'number' ? row.yearLevel : 99;
+  const semester = typeof row.semesterOrder === 'number' ? row.semesterOrder : 99;
+  return [year, semester, row.classification1 ?? '', row.name ?? ''];
+}
+
+function completedTermSortValue(termText: string): number {
+  const text = String(termText ?? '').replace(/\s+/g, '');
+  if (!text) return 99;
+  if (text.includes('1학기')) return 1;
+  if (text.includes('여름')) return 2;
+  if (text.includes('2학기')) return 3;
+  if (text.includes('겨울')) return 4;
+
+  const numeric = Number(text);
+  return Number.isFinite(numeric) ? numeric : 99;
+}
+
+function sortRequiredRows(rows: RequiredCourseRow[]): RequiredCourseRow[] {
+  return [...rows].sort((a, b) => {
+    const [ay, as, ac, an] = requiredRowSortValue(a);
+    const [by, bs, bc, bn] = requiredRowSortValue(b);
+
+    if (ay !== by) return ay - by;
+    if (as !== bs) return as - bs;
+
+    const classDiff = ac.localeCompare(bc, 'ko');
+    if (classDiff !== 0) return classDiff;
+
+    return an.localeCompare(bn, 'ko');
+  });
+}
+
+function sortCompletedRows(rows: CompletedCourseRow[]): CompletedCourseRow[] {
+  return [...rows].sort((a, b) => {
+    const ay = typeof a.yearTaken === 'number' ? a.yearTaken : 9999;
+    const by = typeof b.yearTaken === 'number' ? b.yearTaken : 9999;
+    if (ay !== by) return ay - by;
+
+    const at = completedTermSortValue(a.termText);
+    const bt = completedTermSortValue(b.termText);
+    if (at !== bt) return at - bt;
+
+    return a.name.localeCompare(b.name, 'ko');
+  });
+}
+
 function App() {
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState<string | null>(null);
+  const [sourcePage, setSourcePage] = useState(1);
 
   const [sources, setSources] = useState<SourceItem[]>([]);
   const [catalogs, setCatalogs] = useState<CatalogItem[]>([]);
@@ -147,8 +248,16 @@ function App() {
   const [completedFiles, setCompletedFiles] = useState<File[]>([]);
   const [completedText, setCompletedText] = useState('');
   const [completedRows, setCompletedRows] = useState<CompletedCourseRow[]>([]);
-
+  const [loadedCatalogId, setLoadedCatalogId] = useState('');
+  const [loadedCompletedSetId, setLoadedCompletedSetId] = useState('');
   const majorSources = useMemo(() => sources.filter((item) => item.category === 'major'), [sources]);
+
+  const pagedMajorSources = useMemo(() => {
+    const start = (sourcePage - 1) * SOURCE_PAGE_SIZE;
+    return majorSources.slice(start, start + SOURCE_PAGE_SIZE);
+  }, [majorSources, sourcePage]);
+
+  const totalSourcePages = Math.max(1, Math.ceil(majorSources.length / SOURCE_PAGE_SIZE));
 
   useEffect(() => {
     void refreshCatalogs();
@@ -203,9 +312,9 @@ function App() {
     { key: 'professor', label: '교수명', type: 'text', width: '150px' }
   ];
 
-  const compareColumns: GridColumn<CompareCourseRow>[] = [
-    { key: 'yearLabel', label: '학년/연도', type: 'text', width: '100px', filterable: true },
-    { key: 'termLabel', label: '학기', type: 'text', width: '110px', filterable: true },
+  const compareColumns: GridColumn<CompareTableRow>[] = [
+    { key: 'yearText', label: '학년/연도', type: 'text', width: '100px', filterable: true },
+    { key: 'termText', label: '학기', type: 'text', width: '110px', filterable: true },
     { key: 'classification1', label: '이수구분1', type: 'text', width: '150px', filterable: true },
     { key: 'classification2', label: '이수구분2', type: 'text', width: '120px', filterable: true },
     { key: 'name', label: '교과목명', type: 'text', width: '280px' },
@@ -221,6 +330,7 @@ function App() {
         method: 'POST'
       });
       setSources(data.items);
+      setSourcePage(1);
       setMessage('전공교육과정 링크를 새로 가져왔습니다.');
     } catch (error) {
       setMessage(getErrorMessage(error));
@@ -239,6 +349,174 @@ function App() {
     setCompletedSets(data.items);
   }
 
+    async function loadCatalogIntoEditor(catalogId: string) {
+    if (!catalogId) {
+      setLoadedCatalogId('');
+      setCourseRows([]);
+      setCourseText('');
+      const emptyValues = emptyGraduationCredits();
+      setGraduationValues(emptyValues);
+      setGraduationText(formatGraduationText(emptyValues));
+      return;
+    }
+
+    setBusy('load-catalog');
+    try {
+      const data = await requestJson<CatalogDetailResponse>(`${API_BASE}/catalogs/${catalogId}`);
+
+      const rows: RequiredCourseRow[] = data.courses.map((course) => ({
+        yearLevel: course.yearLevel ?? '',
+        semesterOrder: course.semesterOrder ?? '',
+        classification1: normalizeClassification1(course.classification1 ?? ''),
+        classification2: normalizeClassification2(course.classification2 ?? ''),
+        name: course.name ?? '',
+        credit: course.credit ?? ''
+      }));
+
+      const sortedRows = sortRequiredCourseRows(rows);
+
+      const nextGraduation = emptyGraduationCredits();
+      data.graduationRequirements.forEach((item) => {
+        const label = item.label as keyof GraduationCredits;
+        if (graduationLabels.includes(label)) {
+          nextGraduation[label] = item.credits ?? '';
+        }
+      });
+
+      setLoadedCatalogId(catalogId);
+
+      setCurriculumYear(String(data.year ?? ''));
+      setCurriculumMajor(data.major ?? '');
+      setSelectedSourceId(data.sourceId ?? '');
+      setSelectedSourceUrl(data.sourceUrl ?? '');
+
+      setCourseRows(sortedRows);
+      setCourseText(formatCourseText(sortedRows));
+
+      setGraduationValues(nextGraduation);
+      setGraduationText(formatGraduationText(nextGraduation));
+
+      setMessage('저장된 전공교육과정을 불러왔습니다.');
+    } catch (error) {
+      setMessage(getErrorMessage(error));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function deleteLoadedCatalog() {
+    if (!loadedCatalogId) return;
+
+    const ok = window.confirm('선택한 전공교육과정을 삭제할까요?');
+    if (!ok) return;
+
+    setBusy('delete-catalog');
+    try {
+      await requestJson<{ ok: boolean; id: string }>(`${API_BASE}/catalogs/${loadedCatalogId}`, {
+        method: 'DELETE'
+      });
+
+      if (selectedCatalogId === loadedCatalogId) {
+        setSelectedCatalogId('');
+        setCompareResult(null);
+      }
+
+      setLoadedCatalogId('');
+      setCourseRows([]);
+      setCourseText('');
+      const emptyValues = emptyGraduationCredits();
+      setGraduationValues(emptyValues);
+      setGraduationText(formatGraduationText(emptyValues));
+
+      await refreshCatalogs();
+
+      setMessage('전공교육과정을 삭제했습니다.');
+    } catch (error) {
+      setMessage(getErrorMessage(error));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function loadCompletedSetIntoEditor(setId: string) {
+    if (!setId) {
+      setLoadedCompletedSetId('');
+      setCompletedTitle('내 이수내역');
+      setStudentName('');
+      setStudentNo('');
+      setCompletedRows([]);
+      setCompletedText('');
+      return;
+    }
+
+    setBusy('load-completed');
+    try {
+      const data = await requestJson<CompletedSetDetailResponse>(`${API_BASE}/completed-sets/${setId}`);
+
+      const rows: CompletedCourseRow[] = data.courses.map((course) => ({
+        yearTaken: course.yearTaken ?? '',
+        termText: course.termText ?? '',
+        classification1: normalizeClassification1(course.classification1 ?? ''),
+        classification2: normalizeClassification2(course.classification2 ?? ''),
+        name: course.name ?? '',
+        credit: course.credit ?? '',
+        gradeText: course.gradeText ?? '',
+        professor: course.professor ?? ''
+      }));
+
+      const sortedRows = sortCompletedRows(rows);
+
+      setLoadedCompletedSetId(setId);
+
+      setCompletedTitle(data.title ?? '내 이수내역');
+      setStudentName(data.studentName ?? '');
+      setStudentNo(data.studentNo ?? '');
+
+      setCompletedRows(sortedRows);
+      setCompletedText(formatCompletedText(sortedRows));
+
+      setMessage('저장된 이수내역 세트를 불러왔습니다.');
+    } catch (error) {
+      setMessage(getErrorMessage(error));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function deleteLoadedCompletedSet() {
+    if (!loadedCompletedSetId) return;
+
+    const ok = window.confirm('선택한 이수내역 세트를 삭제할까요?');
+    if (!ok) return;
+
+    setBusy('delete-completed');
+    try {
+      await requestJson<{ ok: boolean; id: string }>(`${API_BASE}/completed-sets/${loadedCompletedSetId}`, {
+        method: 'DELETE'
+      });
+
+      if (selectedCompletedSetId === loadedCompletedSetId) {
+        setSelectedCompletedSetId('');
+        setCompareResult(null);
+      }
+
+      setLoadedCompletedSetId('');
+      setCompletedTitle('내 이수내역');
+      setStudentName('');
+      setStudentNo('');
+      setCompletedRows([]);
+      setCompletedText('');
+
+      await refreshCompletedSets();
+
+      setMessage('이수내역 세트를 삭제했습니다.');
+    } catch (error) {
+      setMessage(getErrorMessage(error));
+    } finally {
+      setBusy(null);
+    }
+  }
+
   function onChangeSource(sourceId: string) {
     setSelectedSourceId(sourceId);
     if (!sourceId) {
@@ -252,7 +530,13 @@ function App() {
   }
 
   async function runCurriculumAi(mode: 'courses' | 'graduation') {
-    const files = mode === 'graduation' ? (curriculumGraduationFiles.length > 0 ? curriculumGraduationFiles : curriculumCourseFiles) : curriculumCourseFiles;
+    const files =
+      mode === 'graduation'
+        ? curriculumGraduationFiles.length > 0
+          ? curriculumGraduationFiles
+          : curriculumCourseFiles
+        : curriculumCourseFiles;
+
     if (files.length === 0) {
       setMessage(mode === 'graduation' ? '졸업이수학점 스크린샷을 먼저 선택하세요.' : '전공교육과정 스크린샷을 먼저 선택하세요.');
       return;
@@ -260,7 +544,7 @@ function App() {
 
     setBusy(`curriculum-${mode}`);
     try {
-      const images = await prepareImagesForUpload(files, true);
+      const images = await prepareImagesForUpload(files, false);
       const data = await requestJson<CurriculumAiResponse>(`${API_BASE}/ai-ocr/curriculum`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -276,6 +560,7 @@ function App() {
         const rows: RequiredCourseRow[] = data.courses.map((course) => {
           const class1 = normalizeClassification1(course.classification1 ?? '');
           const class2 = normalizeClassification2(course.classification2 ?? '');
+
           return {
             yearLevel: course.yearLevel ?? '',
             semesterOrder: course.semesterOrder ?? '',
@@ -285,10 +570,14 @@ function App() {
             credit: course.credit ?? ''
           };
         });
-        setCourseRows(rows);
-        setCourseText(formatCourseText(rows));
+
+        const sortedRows = sortRequiredCourseRows(rows);
+
+        setCourseRows(sortedRows);
+        setCourseText(formatCourseText(sortedRows));
         setMessage('AI가 전공 과목을 추출했습니다. 텍스트를 검수한 뒤 표에 반영하거나 표에서 직접 수정하세요.');
-      } else {
+      }
+        else {
         const values = emptyGraduationCredits();
         graduationLabels.forEach((label) => {
           values[label] = data.graduationCredits[label] ?? '';
@@ -305,10 +594,12 @@ function App() {
   }
 
   function reflectCourseText() {
-    const rows = parseCourseText(courseText);
-    setCourseRows(rows);
-    setMessage(`과목 OCR 텍스트를 표에 반영했습니다. (${rows.length}개)`);
-  }
+  const rows = parseCourseText(courseText);
+  const sortedRows = sortRequiredCourseRows(rows);
+  setCourseRows(sortedRows);
+  setCourseText(formatCourseText(sortedRows));
+  setMessage(`과목 OCR 텍스트를 표에 반영했습니다. (${sortedRows.length}개)`);
+}
 
   function reflectGraduationText() {
     const values = parseGraduationText(graduationText);
@@ -336,7 +627,8 @@ function App() {
           courses: validCourses.map((row) => ({
             yearLevel: numberOrUndefined(row.yearLevel),
             semesterOrder: numberOrUndefined(row.semesterOrder),
-            semesterText: row.yearLevel !== '' && row.semesterOrder !== '' ? `${row.yearLevel}-${row.semesterOrder}` : undefined,
+            semesterText:
+              row.yearLevel !== '' && row.semesterOrder !== '' ? `${row.yearLevel}-${row.semesterOrder}` : undefined,
             classification1: normalizeClassification1(row.classification1),
             classification2: normalizeClassification2(row.classification2),
             classification: combineClassification(row.classification1, row.classification2),
@@ -351,6 +643,7 @@ function App() {
           }))
         })
       });
+
       await refreshCatalogs();
       setSelectedCatalogId(saved.id);
       setMessage('전공교육과정을 DB에 저장했습니다.');
@@ -377,12 +670,14 @@ function App() {
       });
 
       const rows: CompletedCourseRow[] = data.courses.map((course) => {
-        const parts = course.classification1 || course.classification2
-          ? {
-              classification1: normalizeClassification1(course.classification1 ?? ''),
-              classification2: normalizeClassification2(course.classification2 ?? '')
-            }
-          : splitFreeClassification(course.classification ?? '');
+        const parts =
+          course.classification1 || course.classification2
+            ? {
+                classification1: normalizeClassification1(course.classification1 ?? ''),
+                classification2: normalizeClassification2(course.classification2 ?? '')
+              }
+            : splitFreeClassification(course.classification ?? '');
+
         return {
           yearTaken: course.yearTaken ?? '',
           termText: course.termText ?? '',
@@ -394,8 +689,10 @@ function App() {
           professor: course.professor ?? ''
         };
       });
-      setCompletedRows(rows);
-      setCompletedText(formatCompletedText(rows));
+
+      const sortedRows = sortCompletedRows(rows);
+      setCompletedRows(sortedRows);
+      setCompletedText(formatCompletedText(sortedRows));
       setMessage('AI가 이수내역을 추출했습니다. 텍스트를 검수한 뒤 표에 반영하거나 표에서 직접 수정하세요.');
     } catch (error) {
       setMessage(getErrorMessage(error));
@@ -405,10 +702,10 @@ function App() {
   }
 
   function reflectCompletedText() {
-    const rows = parseCompletedText(completedText);
-    setCompletedRows(rows);
-    setMessage(`이수내역 OCR 텍스트를 표에 반영했습니다. (${rows.length}개)`);
-  }
+  const rows = sortCompletedRows(parseCompletedText(completedText));
+  setCompletedRows(rows);
+  setMessage(`이수내역 OCR 텍스트를 표에 반영했습니다. (${rows.length}개)`);
+}
 
   async function saveCompletedSet() {
     const validCourses = completedRows.filter((row) => row.name.trim());
@@ -439,6 +736,7 @@ function App() {
           }))
         })
       });
+
       await refreshCompletedSets();
       setSelectedCompletedSetId(saved.id);
       setMessage('이수내역을 DB에 저장했습니다.');
@@ -471,25 +769,68 @@ function App() {
     }
   }
 
-  function markMissingAsCompleted(rowId: string) {
+  function markMissingAsCompleted(rowId?: string) {
+    if (!rowId) return;
+
     setCompareResult((prev) => {
       if (!prev) return prev;
-      const target = prev.missingCore.find((row) => row.id === rowId);
+
+      const target = prev.buckets.missing.rows.find((row) => row.id === rowId);
       if (!target) return prev;
-      const nextMissing = prev.missingCore.filter((row) => row.id !== rowId);
-      const nextMatched = [...prev.matchedCore, { ...target, gradeText: target.gradeText || '수동이수', professor: target.professor || '' }].sort(sortCompareRows);
+
+      const destinationKey: keyof CompareResponse['buckets'] =
+        target.classification1 === '계열교양'
+          ? 'majorCoreLiberal'
+          : target.classification1 === '전공필수'
+            ? 'majorRequired'
+            : target.classification1 === '전공선택'
+              ? 'majorSelective'
+              : target.classification1 === '기초교양'
+                ? 'basicLiberal'
+                : target.classification1 === '융합교양'
+                  ? 'fusionLiberal'
+                  : 'extraOther';
+
+      const movedRow: CompareTableRow = {
+        ...target,
+        gradeText: target.gradeText || '수동이수'
+      };
+
+      const nextMissingRows = prev.buckets.missing.rows.filter((row) => row.id !== rowId);
+      const nextDestinationRows = [...prev.buckets[destinationKey].rows, movedRow].sort(sortCompareRows);
+
+      const nextBuckets: CompareResponse['buckets'] = {
+        ...prev.buckets,
+        missing: rebuildCompareBucket(prev.buckets.missing, nextMissingRows),
+        [destinationKey]: rebuildCompareBucket(prev.buckets[destinationKey], nextDestinationRows)
+      };
+
+      const nextEarnedCredits =
+        nextBuckets.majorCoreLiberal.earnedCredits +
+        nextBuckets.majorRequired.earnedCredits +
+        nextBuckets.majorSelective.earnedCredits +
+        nextBuckets.basicLiberal.earnedCredits +
+        nextBuckets.fusionLiberal.earnedCredits +
+        nextBuckets.extraLiberal.earnedCredits +
+        nextBuckets.extraMajorRequired.earnedCredits +
+        nextBuckets.extraMajorSelective.earnedCredits +
+        nextBuckets.extraOther.earnedCredits;
+
       return {
-        ...prev,
         summary: {
-          ...prev.summary,
-          matchedCoreCourses: prev.summary.matchedCoreCourses + 1,
-          missingCoreCourses: Math.max(0, prev.summary.missingCoreCourses - 1)
+          earnedCredits: nextEarnedCredits,
+          requiredCredits: prev.summary.requiredCredits,
+          headline:
+            prev.summary.requiredCredits === null
+              ? `${nextEarnedCredits} / -`
+              : `${nextEarnedCredits} / ${prev.summary.requiredCredits}`,
+          expressionText: buildSummaryExpression(nextBuckets)
         },
-        matchedCore: nextMatched,
-        missingCore: nextMissing
+        buckets: nextBuckets
       };
     });
-    setMessage('선택한 미이수 과목을 이수과목 표로 옮겼습니다. 필요하면 저장된 원본 데이터를 함께 수정하세요.');
+
+    setMessage('선택한 미이수 과목을 이수 처리했습니다.');
   }
 
   return (
@@ -500,11 +841,6 @@ function App() {
           <h1>가천대 전공교육과정 AI OCR 비교기</h1>
           <p>AI OCR 결과를 텍스트로 검수하고, 엑셀 같은 표에서 직접 수정한 뒤 DB에 저장하고 비교한다.</p>
         </div>
-        <div className="hero-card">
-          <div className="hero-label">DB 위치</div>
-          <div className="hero-value">backend/prisma/dev.db</div>
-          <div className="hero-sub">VS Code 터미널에서 npm run db:studio</div>
-        </div>
       </header>
 
       {message ? <div className="message">{message}</div> : null}
@@ -513,12 +849,13 @@ function App() {
         <div className="section-head">
           <div>
             <h2>1. 전공교육과정 링크</h2>
-            <p>가천대 요람에서 전공교육과정 링크만 가져온다.</p>
+            <p> </p>
           </div>
           <button className="primary" onClick={() => void refreshSources()} disabled={busy === 'sources'}>
             {busy === 'sources' ? '가져오는 중...' : '전공 링크 가져오기'}
           </button>
         </div>
+
         <div className="table-wrap">
           <table className="simple-table">
             <thead>
@@ -534,7 +871,7 @@ function App() {
                   <td colSpan={3}>아직 링크가 없습니다.</td>
                 </tr>
               ) : (
-                majorSources.map((item) => (
+                pagedMajorSources.map((item) => (
                   <tr key={item.id}>
                     <td>{item.year ?? '-'}</td>
                     <td>{item.title}</td>
@@ -549,13 +886,33 @@ function App() {
             </tbody>
           </table>
         </div>
+
+        <div className="pagination">
+          <button
+            className="ghost"
+            onClick={() => setSourcePage((prev) => Math.max(1, prev - 1))}
+            disabled={sourcePage === 1}
+          >
+            이전
+          </button>
+          <span>
+            {sourcePage} / {totalSourcePages}
+          </span>
+          <button
+            className="ghost"
+            onClick={() => setSourcePage((prev) => Math.min(totalSourcePages, prev + 1))}
+            disabled={sourcePage === totalSourcePages}
+          >
+            다음
+          </button>
+        </div>
       </section>
 
       <section className="card">
         <div className="section-head">
           <div>
-            <h2>2. 전공교육과정 AI OCR</h2>
-            <p>텍스트에서 반영하거나, 표 셀을 클릭 후 더블클릭해서 직접 수정할 수 있다.</p>
+            <h2>2. 전공교육과정</h2>
+            <p>직접 행 추가를 누르고 작성하거나, 표의 셀을 더블클릭해서 직접 수정할 수 있습니다~</p>
           </div>
         </div>
 
@@ -584,20 +941,42 @@ function App() {
         <div className="grid two top-gap">
           <div className="upload-box">
             <div className="upload-title">과목표 스크린샷</div>
-            <input type="file" accept="image/*" multiple onChange={(event) => setCurriculumCourseFiles(Array.from(event.target.files ?? []))} />
+            <input
+              type="file"
+              accept="image/*"
+              multiple
+              onChange={(event) => setCurriculumCourseFiles(Array.from(event.target.files ?? []))}
+            />
             <div className="file-count">{curriculumCourseFiles.length}개 선택됨</div>
-            <button className="primary" onClick={() => void runCurriculumAi('courses')} disabled={busy === 'curriculum-courses'}>
-              {busy === 'curriculum-courses' ? 'AI 분석 중...' : '과목 AI OCR 실행'}
+           
+            <button
+              className="primary ocr-run-button"
+              onClick={() => void runCurriculumAi('courses')}
+              disabled={busy === 'curriculum-courses'}
+            >
+              {busy === 'curriculum-courses' ? '잠시만 기다려주세요 ~' : '과목 텍스트 추출 실행!'}
             </button>
           </div>
+
           <div className="upload-box">
             <div className="upload-title">졸업이수학점 스크린샷</div>
-            <input type="file" accept="image/*" multiple onChange={(event) => setCurriculumGraduationFiles(Array.from(event.target.files ?? []))} />
+            <input
+              type="file"
+              accept="image/*"
+              multiple
+              onChange={(event) => setCurriculumGraduationFiles(Array.from(event.target.files ?? []))}
+            />
             <div className="file-count">
-              {curriculumGraduationFiles.length > 0 ? `${curriculumGraduationFiles.length}개 선택됨` : '없으면 과목표 스크린샷을 그대로 사용'}
+              {curriculumGraduationFiles.length > 0
+                ? `${curriculumGraduationFiles.length}개 선택됨`
+                : '없으면 과목표 스크린샷을 그대로 사용'}
             </div>
-            <button className="secondary" onClick={() => void runCurriculumAi('graduation')} disabled={busy === 'curriculum-graduation'}>
-              {busy === 'curriculum-graduation' ? 'AI 분석 중...' : '졸업이수학점 AI OCR 실행'}
+            <button
+              className="primary ocr-run-button"
+              onClick={() => void runCurriculumAi('graduation')}
+              disabled={busy === 'curriculum-graduation'}
+            >
+              {busy === 'curriculum-graduation' ? '잠시만 기다려주세요 ~' : '졸업이수학점 텍스트 추출 실행!'}
             </button>
           </div>
         </div>
@@ -606,33 +985,81 @@ function App() {
           <div>
             <div className="subhead-row">
               <h3>과목 OCR 결과</h3>
-              <button className="ghost" onClick={reflectCourseText}>과목표에 반영</button>
+              <button className="ghost reflect-button" onClick={reflectCourseText}>
+                과목표에 반영
+              </button>
             </div>
             <p className="hint">한 줄에 과목 1개씩. 형식: 학년 / 학기 / 이수구분1/이수구분2 / 교과목명 / 학점</p>
             <textarea value={courseText} onChange={(event) => setCourseText(event.target.value)} rows={12} />
           </div>
+
           <div>
             <div className="subhead-row">
               <h3>졸업이수학점 OCR 결과</h3>
-              <button className="ghost" onClick={reflectGraduationText}>이수학점표에 반영</button>
+              <button className="ghost reflect-button" onClick={reflectGraduationText}>
+                이수학점표에 반영
+              </button>
             </div>
-            <p className="hint">형식: 기초교양 / 17 / 융합교양 / 11 / 계열교양 / 24 / 전공필수 / 21 / 전공선택 / 51 / 총학점 / 130</p>
+            <p className="hint">
+              형식: 기초교양 / 17 / 융합교양 / 11 / 계열교양 / 24 / 전공필수 / 21 / 전공선택 / 51 /
+              총학점 / 130
+            </p>
             <textarea value={graduationText} onChange={(event) => setGraduationText(event.target.value)} rows={12} />
           </div>
         </div>
 
-        <div className="subhead-row top-gap">
-          <h3>전공 과목 표</h3>
-          <button className="ghost" onClick={() => setCourseRows((prev) => [...prev, emptyRequiredCourseRow()])}>행 추가</button>
+        <div className="subhead-row top-gap table-toolbar-row">
+          <h3 className="table-toolbar-title">전공 과목 표</h3>
+          <div className="table-head-tools single-line-tools">
+            <select
+              className="saved-load-select"
+              value={loadedCatalogId}
+              onChange={(event) => void loadCatalogIntoEditor(event.target.value)}
+            >
+              <option value="">시간표를 선택하세요</option>
+              {catalogs.map((item) => (
+                <option key={item.id} value={item.id}>
+                  {item.year} / {item.major}
+                </option>
+              ))}
+            </select>
+
+            <button
+              className="danger delete-inline-button"
+              onClick={() => void deleteLoadedCatalog()}
+              disabled={!loadedCatalogId || busy === 'delete-catalog'}
+            >
+              {busy === 'delete-catalog' ? '삭제 중...' : '삭제'}
+            </button>
+
+            <span className="hint no-margin total-count-inline">
+              총 과목 수 : {courseRows.filter((row) => row.name.trim()).length}
+            </span>
+
+            <button
+              className="ghost"
+              onClick={() => setCourseRows((prev) => [...prev, emptyRequiredCourseRow()])}
+            >
+              행 추가
+            </button>
+          </div>
         </div>
-        <SpreadsheetTable columns={courseColumns} rows={courseRows} setRows={setCourseRows} emptyText="과목 AI OCR을 실행한 뒤 텍스트를 검수하고 반영하세요." visibleRowCount={10} filterable />
+
+        <SpreadsheetTable
+          columns={courseColumns}
+          rows={courseRows}
+          setRows={setCourseRows}
+          emptyText="과목 AI OCR을 실행한 뒤 텍스트를 검수하고 반영하세요."
+          visibleRowCount={10}
+          filterable
+        />
 
         <h3 className="top-gap">졸업이수학점 표</h3>
         <GraduationSheet values={graduationValues} onChange={setGraduationValues} />
 
         <div className="actions top-gap">
-          <button className="primary" onClick={() => void saveCatalog()} disabled={busy === 'save-catalog'}>
-            {busy === 'save-catalog' ? '저장 중...' : '전공교육과정 DB 저장'}
+          <button className="primary save-button" onClick={() => void saveCatalog()} disabled={busy === 'save-catalog'}>
+            {busy === 'save-catalog' ? '저장 중...' : '전공교육과정 저장'}
           </button>
         </div>
       </section>
@@ -641,7 +1068,7 @@ function App() {
         <div className="section-head">
           <div>
             <h2>3. 이수내역 AI OCR</h2>
-            <p>이수내역도 같은 방식으로 텍스트 검수 후 표 셀을 직접 수정해서 저장한다.</p>
+            <p> </p>
           </div>
         </div>
 
@@ -662,29 +1089,77 @@ function App() {
 
         <div className="upload-box top-gap">
           <div className="upload-title">이수내역 스크린샷</div>
-          <input type="file" accept="image/*" multiple onChange={(event) => setCompletedFiles(Array.from(event.target.files ?? []))} />
+          <input
+            type="file"
+            accept="image/*"
+            multiple
+            onChange={(event) => setCompletedFiles(Array.from(event.target.files ?? []))}
+          />
           <div className="file-count">{completedFiles.length}개 선택됨</div>
           <button className="primary" onClick={() => void runCompletedAi()} disabled={busy === 'completed-ocr'}>
             {busy === 'completed-ocr' ? 'AI 분석 중...' : '이수내역 AI OCR 실행'}
           </button>
         </div>
 
-        <div className="subhead-row top-gap">
+        <div className="subhead-row top-gap table-toolbar-row">
           <h3>이수내역 OCR 결과</h3>
-          <button className="ghost" onClick={reflectCompletedText}>이수내역표에 반영</button>
+          <button className="ghost" onClick={reflectCompletedText}>
+            이수내역표에 저장
+          </button>
         </div>
         <p className="hint">한 줄에 과목 1개씩. 형식: 연도 / 학기 / 이수구분1/이수구분2 / 교과목명 / 학점 / 성적 / 교수명</p>
         <textarea value={completedText} onChange={(event) => setCompletedText(event.target.value)} rows={12} />
 
-        <div className="subhead-row top-gap">
-          <h3>이수내역 표</h3>
-          <button className="ghost" onClick={() => setCompletedRows((prev) => [...prev, emptyCompletedCourseRow()])}>행 추가</button>
+        <div className="subhead-row top-gap table-toolbar-row">
+          <h3 className="table-toolbar-title">이수내역 표</h3>
+          <div className="table-head-tools single-line-tools">
+            <select
+              className="saved-load-select"
+              value={loadedCompletedSetId}
+              onChange={(event) => void loadCompletedSetIntoEditor(event.target.value)}
+            >
+              <option value="">이수내역을 선택하세요</option>
+              {completedSets.map((item) => (
+                <option key={item.id} value={item.id}>
+                  {item.title}
+                  {item.studentName ? ` / ${item.studentName}` : ''}
+                </option>
+              ))}
+            </select>
+
+            <button
+              className="danger delete-inline-button"
+              onClick={() => void deleteLoadedCompletedSet()}
+              disabled={!loadedCompletedSetId || busy === 'delete-completed'}
+            >
+              {busy === 'delete-completed' ? '삭제 중...' : '삭제'}
+            </button>
+
+            <span className="hint no-margin total-count-inline">
+              총 과목 수 : {completedRows.filter((row) => row.name.trim()).length}
+            </span>
+
+            <button
+              className="ghost"
+              onClick={() => setCompletedRows((prev) => [...prev, emptyCompletedCourseRow()])}
+            >
+              행 추가
+            </button>
+          </div>
         </div>
-        <SpreadsheetTable columns={completedColumns} rows={completedRows} setRows={setCompletedRows} emptyText="이수내역 AI OCR을 실행한 뒤 텍스트를 검수하고 반영하세요." visibleRowCount={10} filterable />
+
+        <SpreadsheetTable
+          columns={completedColumns}
+          rows={completedRows}
+          setRows={setCompletedRows}
+          emptyText="이수내역 AI OCR을 실행한 뒤 텍스트를 검수하고 반영하세요."
+          visibleRowCount={10}
+          filterable
+        />
 
         <div className="actions top-gap">
-          <button className="primary" onClick={() => void saveCompletedSet()} disabled={busy === 'save-completed'}>
-            {busy === 'save-completed' ? '저장 중...' : '이수내역 DB 저장'}
+          <button className="primary save-button" onClick={() => void saveCompletedSet()} disabled={busy === 'save-completed'}>
+            {busy === 'save-completed' ? '저장 중...' : '이수내역 저장'}
           </button>
         </div>
       </section>
@@ -693,7 +1168,7 @@ function App() {
         <div className="section-head">
           <div>
             <h2>4. 저장된 데이터 비교</h2>
-            <p>DB에 저장된 전공교육과정과 이수내역 세트를 선택해서 비교한다.</p>
+            <p> </p>
           </div>
           <button className="primary" onClick={() => void compareSelected()} disabled={busy === 'compare'}>
             {busy === 'compare' ? '비교 중...' : '비교 실행'}
@@ -712,6 +1187,7 @@ function App() {
               ))}
             </select>
           </label>
+
           <label>
             <span>이수내역 세트</span>
             <select value={selectedCompletedSetId} onChange={(event) => setSelectedCompletedSetId(event.target.value)}>
@@ -729,39 +1205,92 @@ function App() {
         {compareResult ? (
           <div className="compare-box top-gap">
             <div className="compare-summary compare-summary--4">
-              <div>이수과목(제1학과): {compareResult.summary.matchedCoreCourses}</div>
-              <div>미이수 과목(제1학과): {compareResult.summary.missingCoreCourses}</div>
-              <div>선택 이수 과목(제1학과): {compareResult.summary.matchedSelectiveCourses}</div>
-              <div>추가 이수 과목: {compareResult.summary.extraCompletedCourses}</div>
+              <div>{compareResult.summary.headline}</div>
+              <div>{compareResult.summary.expressionText}</div>
+              <div>미이수 과목 수 : {compareResult.buckets.missing.rows.length}</div>
+              <div>
+                추가 이수 과목 수 :{' '}
+                {compareResult.buckets.extraLiberal.rows.length +
+                  compareResult.buckets.extraMajorRequired.rows.length +
+                  compareResult.buckets.extraMajorSelective.rows.length +
+                  compareResult.buckets.extraOther.rows.length}
+              </div>
             </div>
 
-            <div className="top-gap">
-              <h3>이수과목(제1학과)</h3>
-              <ReadonlySpreadsheetTable columns={compareColumns} rows={compareResult.matchedCore} visibleRowCount={10} emptyText="일치한 이수과목이 없습니다." filterable />
-            </div>
+            <CompareBucketSection
+              bucket={compareResult.buckets.majorCoreLiberal}
+              columns={compareColumns}
+              visibleRowCount={10}
+              emptyText="계열교양(제1학과) 이수 과목이 없습니다."
+            />
 
-            <div className="top-gap">
-              <h3>미이수 과목(제1학과)</h3>
-              <ReadonlySpreadsheetTable
-                columns={compareColumns}
-                rows={compareResult.missingCore}
-                visibleRowCount={10}
-                emptyText="미이수 과목이 없습니다."
-                filterable
-                actionLabel="이수"
-                onAction={(row) => markMissingAsCompleted(row.id)}
-              />
-            </div>
+            <CompareBucketSection
+              bucket={compareResult.buckets.majorRequired}
+              columns={compareColumns}
+              visibleRowCount={10}
+              emptyText="전공필수(제1학과) 이수 과목이 없습니다."
+            />
 
-            <div className="top-gap">
-              <h3>선택 이수 과목(제1학과)</h3>
-              <ReadonlySpreadsheetTable columns={compareColumns} rows={compareResult.matchedSelective} visibleRowCount={10} emptyText="선택 이수 과목이 없습니다." filterable />
-            </div>
+            <CompareBucketSection
+              bucket={compareResult.buckets.majorSelective}
+              columns={compareColumns}
+              visibleRowCount={10}
+              emptyText="전공선택(제1학과) 이수 과목이 없습니다."
+            />
 
-            <div className="top-gap">
-              <h3>추가 이수 과목</h3>
-              <ReadonlySpreadsheetTable columns={compareColumns} rows={compareResult.extraCompleted} visibleRowCount={10} emptyText="추가 이수 과목이 없습니다." filterable />
-            </div>
+            <CompareBucketSection
+              bucket={compareResult.buckets.basicLiberal}
+              columns={compareColumns}
+              visibleRowCount={10}
+              emptyText="기초교양 이수 과목이 없습니다."
+            />
+
+            <CompareBucketSection
+              bucket={compareResult.buckets.fusionLiberal}
+              columns={compareColumns}
+              visibleRowCount={10}
+              emptyText="융합교양 이수 과목이 없습니다."
+            />
+
+            <CompareBucketSection
+              bucket={compareResult.buckets.missing}
+              columns={compareColumns}
+              visibleRowCount={10}
+              emptyText="미이수 과목이 없습니다."
+              actionLabel="이수"
+              onAction={(row) => {
+                const rowId = String((row as { id?: string }).id ?? '');
+                if (rowId) markMissingAsCompleted(rowId);
+              }}
+            />
+
+            <CompareBucketSection
+              bucket={compareResult.buckets.extraLiberal}
+              columns={compareColumns}
+              visibleRowCount={10}
+              emptyText="추가이수교양 과목이 없습니다."
+            />
+
+            <CompareBucketSection
+              bucket={compareResult.buckets.extraMajorRequired}
+              columns={compareColumns}
+              visibleRowCount={10}
+              emptyText="추가 이수 전공(전공필수) 과목이 없습니다."
+            />
+
+            <CompareBucketSection
+              bucket={compareResult.buckets.extraMajorSelective}
+              columns={compareColumns}
+              visibleRowCount={10}
+              emptyText="추가 이수 전공(전공선택) 과목이 없습니다."
+            />
+
+            <CompareBucketSection
+              bucket={compareResult.buckets.extraOther}
+              columns={compareColumns}
+              visibleRowCount={10}
+              emptyText="그외 추가이수과목이 없습니다."
+            />
           </div>
         ) : null}
       </section>
@@ -769,8 +1298,124 @@ function App() {
   );
 }
 
-function GraduationSheet({ values, onChange }: { values: GraduationCredits; onChange: (next: GraduationCredits) => void }) {
-  const columns = graduationLabels.map((label) => ({ key: label, label, type: 'int' as const, width: '140px' }));
+type CompareBucketLike<Row extends Record<string, unknown>> = {
+  title: string;
+  headline: string;
+  subline: string;
+  earnedCredits: number;
+  requiredCredits: number | null;
+  remainingCredits: number | null;
+  rows: Row[];
+};
+
+function CompareBucketSection<Row extends Record<string, unknown>>({
+  bucket,
+  columns,
+  visibleRowCount,
+  emptyText,
+  actionLabel,
+  onAction
+}: {
+  bucket: CompareBucketLike<Row>;
+  columns: GridColumn<Row>[];
+  visibleRowCount: number;
+  emptyText: string;
+  actionLabel?: string;
+  onAction?: (row: Row) => void;
+}) {
+  return (
+    <div className="compare-section">
+      <div className="compare-section-head">
+        <h3 className="compare-section-title">{bucket.title}</h3>
+        <CompareProgressCard
+          headline={bucket.headline}
+          subline={bucket.subline}
+          remainingCredits={bucket.remainingCredits}
+        />
+      </div>
+
+      <ReadonlySpreadsheetTable
+        columns={columns}
+        rows={bucket.rows}
+        visibleRowCount={visibleRowCount}
+        emptyText={emptyText}
+        filterable
+        actionLabel={actionLabel}
+        onAction={onAction}
+      />
+    </div>
+  );
+}
+
+function CompareProgressCard({
+  headline,
+  subline,
+  remainingCredits
+}: {
+  headline: string;
+  subline: string;
+  remainingCredits: number | null;
+}) {
+  const parsed = parseProgressSubline(subline, remainingCredits);
+
+  return (
+    <div className="compare-progress-card">
+      <div className="compare-progress-headline">{headline}</div>
+      {parsed}
+    </div>
+  );
+}
+
+function parseProgressSubline(subline: string, remainingCredits: number | null) {
+  if (remainingCredits === 0) {
+    return (
+      <div className="compare-progress-subline compare-progress-subline--done">
+        <strong>다 들으셨어요!</strong>
+      </div>
+    );
+  }
+
+  if (!subline) return null;
+
+  const match = subline.match(/^(.+?)\s+(\d+)학점 더 들으셔야 해요!?$/);
+
+  if (match) {
+    const shortLabel = match[1];
+    const remain = match[2];
+
+    return (
+      <div className="compare-progress-subline compare-progress-subline--danger">
+        <strong>
+          <span className="compare-progress-emphasis">
+            {shortLabel} {remain}
+          </span>
+          학점 더 들으셔야 해요!
+        </strong>
+      </div>
+    );
+  }
+
+  return (
+    <div className="compare-progress-subline">
+      <strong>{subline}</strong>
+    </div>
+  );
+}
+
+function GraduationSheet({
+  values,
+  onChange
+}: {
+  values: GraduationCredits;
+  onChange: (next: GraduationCredits) => void;
+}) {
+  const columns = graduationLabels.map((label) => ({
+    key: label,
+    label,
+    type: 'int' as const,
+    width: '140px'
+  }));
+
   const [selectedCell, setSelectedCell] = useState<string | null>(null);
   const [editingCell, setEditingCell] = useState<string | null>(null);
 
@@ -798,6 +1443,7 @@ function GraduationSheet({ values, onChange }: { values: GraduationCredits; onCh
                 const value = values[key];
                 const isSelected = selectedCell === cellId;
                 const isEditing = editingCell === cellId;
+
                 return (
                   <td key={column.key} style={{ minWidth: column.width }}>
                     {isEditing ? (
@@ -878,20 +1524,26 @@ function SpreadsheetTable<Row extends Record<string, unknown>>({
   return (
     <div className="sheet-shell">
       {filterable ? <FilterBar columns={columns} rows={rows} filters={filters} onChange={setFilters} /> : null}
+
       <div className="sheet-scroll" style={{ maxHeight: `${visibleRowCount * 56 + 52}px` }}>
         <table className="sheet-table">
           <thead>
             <tr>
               {columns.map((column) => (
-                <th key={column.key} style={{ minWidth: column.width }}>{column.label}</th>
+                <th key={column.key} style={{ minWidth: column.width }}>
+                  {column.label}
+                </th>
               ))}
               <th style={{ width: '86px' }}>삭제</th>
             </tr>
           </thead>
+
           <tbody>
             {filteredRows.length === 0 ? (
               <tr>
-                <td colSpan={columns.length + 1} className="empty-cell">{emptyText}</td>
+                <td colSpan={columns.length + 1} className="empty-cell">
+                  {emptyText}
+                </td>
               </tr>
             ) : (
               filteredRows.map(({ row, rowIndex }) => (
@@ -900,6 +1552,7 @@ function SpreadsheetTable<Row extends Record<string, unknown>>({
                     const isSelected = selectedCell?.rowIndex === rowIndex && selectedCell.key === column.key;
                     const isEditing = editingCell?.rowIndex === rowIndex && editingCell.key === column.key;
                     const cellValue = row[column.key];
+
                     return (
                       <td key={column.key} style={{ minWidth: column.width }}>
                         {isEditing ? (
@@ -924,8 +1577,11 @@ function SpreadsheetTable<Row extends Record<string, unknown>>({
                       </td>
                     );
                   })}
+
                   <td>
-                    <button className="danger" onClick={() => removeRow(rowIndex)}>삭제</button>
+                    <button className="danger action-button" onClick={() => removeRow(rowIndex)}>
+                      삭제
+                    </button>
                   </td>
                 </tr>
               ))
@@ -955,6 +1611,27 @@ function ReadonlySpreadsheetTable<Row extends Record<string, unknown>>({
   onAction?: (row: Row) => void;
 }) {
   const [filters, setFilters] = useState<Record<string, string>>({});
+  const resizeStateRef = useRef<{
+    index: number;
+    startX: number;
+    startCurrentWidth: number;
+    startNextWidth: number;
+  } | null>(null);
+
+  const initialColumnWidths = useMemo(() => {
+    const result: Record<string, number> = {};
+    columns.forEach((column) => {
+      result[column.key] = widthStringToNumber(column.width, 160);
+    });
+    return result;
+  }, [columns]);
+
+  const [columnWidths, setColumnWidths] = useState<Record<string, number>>(initialColumnWidths);
+
+  useEffect(() => {
+    setColumnWidths(initialColumnWidths);
+  }, [initialColumnWidths]);
+
   const filteredRows = useMemo(() => {
     return rows.filter((row) =>
       columns.every((column) => {
@@ -965,35 +1642,144 @@ function ReadonlySpreadsheetTable<Row extends Record<string, unknown>>({
     );
   }, [columns, filters, rows]);
 
+  function startResize(
+    event: { clientX: number; preventDefault: () => void },
+    index: number
+  ) {
+    if (index >= columns.length - 1) return;
+
+    const currentKey = columns[index].key;
+    const nextKey = columns[index + 1].key;
+
+    const currentWidth = columnWidths[currentKey] ?? widthStringToNumber(columns[index].width, 160);
+    const nextWidth = columnWidths[nextKey] ?? widthStringToNumber(columns[index + 1].width, 160);
+
+    resizeStateRef.current = {
+      index,
+      startX: event.clientX,
+      startCurrentWidth: currentWidth,
+      startNextWidth: nextWidth
+    };
+
+    event.preventDefault();
+
+    const handleMouseMove = (moveEvent: MouseEvent) => {
+      const active = resizeStateRef.current;
+      if (!active) return;
+
+      const delta = moveEvent.clientX - active.startX;
+      const minWidth = 80;
+
+      let nextCurrent = active.startCurrentWidth + delta;
+      let nextNeighbor = active.startNextWidth - delta;
+
+      if (nextCurrent < minWidth) {
+        const shortage = minWidth - nextCurrent;
+        nextCurrent = minWidth;
+        nextNeighbor -= shortage;
+      }
+
+      if (nextNeighbor < minWidth) {
+        const shortage = minWidth - nextNeighbor;
+        nextNeighbor = minWidth;
+        nextCurrent -= shortage;
+      }
+
+      if (nextCurrent < minWidth || nextNeighbor < minWidth) return;
+
+      const leftKey = columns[active.index].key;
+      const rightKey = columns[active.index + 1].key;
+
+      setColumnWidths((prev) => ({
+        ...prev,
+        [leftKey]: nextCurrent,
+        [rightKey]: nextNeighbor
+      }));
+    };
+
+    const handleMouseUp = () => {
+      resizeStateRef.current = null;
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+  }
+
+  const actionColumnWidth = actionLabel ? 120 : 0;
+
+  const tablePixelWidth =
+    columns.reduce((sum, column) => sum + (columnWidths[column.key] ?? widthStringToNumber(column.width, 160)), 0) +
+    actionColumnWidth;
+
   return (
     <div className="sheet-shell">
       {filterable ? <FilterBar columns={columns} rows={rows} filters={filters} onChange={setFilters} /> : null}
+
       <div className="sheet-scroll" style={{ maxHeight: `${visibleRowCount * 56 + 52}px` }}>
-        <table className="sheet-table">
+        <table
+          className="sheet-table"
+          style={{
+            width: `${tablePixelWidth}px`,
+            minWidth: '100%'
+          }}
+        >
+          <colgroup>
+            {columns.map((column) => (
+              <col
+                key={column.key}
+                style={{
+                  width: `${columnWidths[column.key] ?? widthStringToNumber(column.width, 160)}px`
+                }}
+              />
+            ))}
+            {actionLabel ? <col style={{ width: `${actionColumnWidth}px` }} /> : null}
+          </colgroup>
+
           <thead>
             <tr>
-              {columns.map((column) => (
-                <th key={column.key} style={{ minWidth: column.width }}>{column.label}</th>
+              {columns.map((column, index) => (
+                <th key={column.key} className="resizable-th">
+                  <div className="th-content">{column.label}</div>
+                  {index < columns.length - 1 ? (
+                    <div
+                      className="col-resizer"
+                      onMouseDown={(event) => startResize(event, index)}
+                    />
+                  ) : null}
+                </th>
               ))}
-              {actionLabel ? <th style={{ width: '98px' }}>이수선택</th> : null}
+              {actionLabel ? <th>이수선택</th> : null}
             </tr>
           </thead>
+
           <tbody>
             {filteredRows.length === 0 ? (
               <tr>
-                <td colSpan={columns.length + (actionLabel ? 1 : 0)} className="empty-cell">{emptyText}</td>
+                <td colSpan={columns.length + (actionLabel ? 1 : 0)} className="empty-cell">
+                  {emptyText}
+                </td>
               </tr>
             ) : (
               filteredRows.map((row, index) => (
                 <tr key={(row as { id?: string }).id ?? index}>
                   {columns.map((column) => (
-                    <td key={column.key} style={{ minWidth: column.width }}>
-                      <div className="sheet-cell">{String(row[column.key] ?? '')}</div>
+                    <td key={column.key}>
+                      <div className="sheet-cell" title={String(row[column.key] ?? '')}>
+                        {String(row[column.key] ?? '')}
+                      </div>
                     </td>
                   ))}
+
                   {actionLabel ? (
-                    <td>
-                      <button className="secondary action-button" onClick={() => onAction?.(row)}>{actionLabel}</button>
+                    <td className="row-action-cell">
+                      <button
+                        className="secondary action-button row-action-button"
+                        onClick={() => onAction?.(row)}
+                      >
+                        {actionLabel}
+                      </button>
                     </td>
                   ) : null}
                 </tr>
@@ -1019,22 +1805,27 @@ function FilterBar<Row extends Record<string, unknown>>({
 }) {
   return (
     <div className="sheet-filters">
-      {columns.filter((column) => column.filterable).map((column) => {
-        const values = column.options?.filter((value) => value !== '') ?? uniqueColumnValues(rows, column.key);
-        return (
-          <label key={column.key} className="filter-box">
-            <span>{column.label} 필터</span>
-            <select value={filters[column.key] ?? ''} onChange={(event) => onChange((prev) => ({ ...prev, [column.key]: event.target.value }))}>
-              <option value="">전체</option>
-              {values.map((value) => (
-                <option key={value} value={value}>
-                  {value || '(빈값)'}
-                </option>
-              ))}
-            </select>
-          </label>
-        );
-      })}
+      {columns
+        .filter((column) => column.filterable)
+        .map((column) => {
+          const values = column.options?.filter((value) => value !== '') ?? uniqueColumnValues(rows, column.key);
+          return (
+            <label key={column.key} className="filter-box">
+              <span>{column.label} 필터</span>
+              <select
+                value={filters[column.key] ?? ''}
+                onChange={(event) => onChange((prev) => ({ ...prev, [column.key]: event.target.value }))}
+              >
+                <option value="">전체</option>
+                {values.map((value) => (
+                  <option key={value} value={value}>
+                    {value || '(빈값)'}
+                  </option>
+                ))}
+              </select>
+            </label>
+          );
+        })}
     </div>
   );
 }
@@ -1052,9 +1843,17 @@ function EditableCell<Row extends Record<string, unknown>>({
 }) {
   if (column.type === 'select') {
     return (
-      <select className="cell-input" autoFocus defaultValue={String(value ?? '')} onBlur={(event) => onCommit(event.target.value)} onChange={(event) => onCommit(event.target.value)}>
+      <select
+        className="cell-input"
+        autoFocus
+        defaultValue={String(value ?? '')}
+        onBlur={(event) => onCommit(event.target.value)}
+        onChange={(event) => onCommit(event.target.value)}
+      >
         {(column.options ?? []).map((option) => (
-          <option key={option || '__blank'} value={option}>{option || '(빈값)'}</option>
+          <option key={option || '__blank'} value={option}>
+            {option || '(빈값)'}
+          </option>
         ))}
       </select>
     );
@@ -1088,18 +1887,94 @@ function uniqueColumnValues<Row extends Record<string, unknown>>(rows: Row[], ke
   return Array.from(values).sort((a, b) => a.localeCompare(b, 'ko'));
 }
 
-function sortCompareRows(a: CompareCourseRow, b: CompareCourseRow): number {
-  const yearA = parseInt(a.yearLabel, 10);
-  const yearB = parseInt(b.yearLabel, 10);
-  const yearDiff = (Number.isFinite(yearA) ? yearA : 999) - (Number.isFinite(yearB) ? yearB : 999);
+function sortCompareRows(a: CompareTableRow, b: CompareTableRow): number {
+  const yearA = parseInt(a.yearText, 10);
+  const yearB = parseInt(b.yearText, 10);
+  const yearDiff = (Number.isFinite(yearA) ? yearA : 9999) - (Number.isFinite(yearB) ? yearB : 9999);
   if (yearDiff !== 0) return yearDiff;
 
-  const termA = parseInt(a.termLabel, 10);
-  const termB = parseInt(b.termLabel, 10);
-  const termDiff = (Number.isFinite(termA) ? termA : 999) - (Number.isFinite(termB) ? termB : 999);
+  const termA = parseInt(a.termText, 10);
+  const termB = parseInt(b.termText, 10);
+  const termDiff = (Number.isFinite(termA) ? termA : 9999) - (Number.isFinite(termB) ? termB : 9999);
   if (termDiff !== 0) return termDiff;
 
   return a.name.localeCompare(b.name, 'ko');
+}
+
+function sortRequiredCourseRows(rows: RequiredCourseRow[]): RequiredCourseRow[] {
+  return [...rows].sort((a, b) => {
+    const yearDiff = compareNumberCell(a.yearLevel, b.yearLevel);
+    if (yearDiff !== 0) return yearDiff;
+
+    const semesterDiff = compareNumberCell(a.semesterOrder, b.semesterOrder);
+    if (semesterDiff !== 0) return semesterDiff;
+
+    return 0;
+  });
+}
+
+function compareNumberCell(a: number | '', b: number | ''): number {
+  const av = a === '' ? 999 : a;
+  const bv = b === '' ? 999 : b;
+  return av - bv;
+}
+
+function sumCompareRowCredits(rows: CompareTableRow[]): number {
+  return rows.reduce((sum, row) => sum + (typeof row.credit === 'number' ? row.credit : 0), 0);
+}
+
+function getBucketShortLabel(title: string): string {
+  if (title.includes('계열교양')) return '계교';
+  if (title.includes('전공필수')) return '전필';
+  if (title.includes('전공선택')) return '전선';
+  if (title === '기초교양') return '기초';
+  if (title === '융합교양') return '융합';
+  return '';
+}
+
+function rebuildCompareBucket(bucket: CompareBucket, rows: CompareTableRow[]): CompareBucket {
+  const earnedCredits = sumCompareRowCredits(rows);
+  const requiredCredits = bucket.requiredCredits ?? null;
+  const remainingCredits = requiredCredits === null ? null : Math.max(0, requiredCredits - earnedCredits);
+  const shortLabel = getBucketShortLabel(bucket.title);
+
+  let headline = '';
+  let subline = '';
+
+  if (bucket.title === '미이수') {
+    headline = `과목 수 : ${rows.length}`;
+  } else if (requiredCredits === null) {
+    headline = `들은 학점 총합 : ${earnedCredits}`;
+  } else {
+    headline = `${earnedCredits} / ${requiredCredits}`;
+    subline =
+      remainingCredits > 0 ? `${shortLabel} ${remainingCredits}학점 더 들으셔야 해요!` : `${shortLabel} 충족 완료!`;
+  }
+
+  return {
+    ...bucket,
+    rows,
+    earnedCredits,
+    requiredCredits,
+    remainingCredits,
+    headline,
+    subline
+  };
+}
+
+function buildSummaryExpression(buckets: CompareResponse['buckets']): string {
+  const majorCore = buckets.majorCoreLiberal.earnedCredits;
+  const majorRequired = buckets.majorRequired.earnedCredits;
+  const majorSelective = buckets.majorSelective.earnedCredits;
+  const basic = buckets.basicLiberal.earnedCredits;
+  const fusion = buckets.fusionLiberal.earnedCredits;
+  const missing = 0;
+  const extraLiberal = buckets.extraLiberal.earnedCredits;
+  const extraMajorRequired = buckets.extraMajorRequired.earnedCredits;
+  const extraMajorSelective = buckets.extraMajorSelective.earnedCredits;
+  const extraOther = buckets.extraOther.earnedCredits;
+
+  return `(${majorCore} + ${majorRequired} + ${majorSelective}) + ${basic} + ${fusion} + ${missing} + ${extraLiberal} + ${extraMajorRequired} + ${extraMajorSelective} + ${extraOther}`;
 }
 
 async function requestJson<T>(input: RequestInfo | URL, init?: RequestInit): Promise<T> {
@@ -1109,6 +1984,16 @@ async function requestJson<T>(input: RequestInfo | URL, init?: RequestInit): Pro
     throw new Error(json.message ?? '요청에 실패했습니다.');
   }
   return json;
+}
+
+function widthStringToNumber(value: string | undefined, fallback: number): number {
+  if (!value) return fallback;
+
+  const matched = String(value).match(/\d+/);
+  if (!matched) return fallback;
+
+  const parsed = Number(matched[0]);
+  return Number.isFinite(parsed) ? parsed : fallback;
 }
 
 function getErrorMessage(error: unknown): string {

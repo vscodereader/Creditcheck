@@ -3,7 +3,11 @@ import { prisma } from '../lib/prisma.js';
 import { fetchGachonSources, GACHON_CATALOG_URL } from '../services/gachonScraper.js';
 import { analyzeCompletedImages, analyzeCurriculumImages, type AiImageInput } from '../services/openaiOcr.js';
 import { getUsageSummary } from '../services/usageMeter.js';
-import { compareCourses, type CourseInput } from '../utils/compareCourses.js';
+import {
+  compareCourses,
+  type CourseInput,
+  type GraduationRequirementInput
+} from '../utils/compareCourses.js';
 import { toBoolean, toInt } from '../utils/normalize.js';
 
 const router = Router();
@@ -154,6 +158,37 @@ router.get('/catalogs/:catalogId', async (req, res, next) => {
   }
 });
 
+router.delete('/catalogs/:catalogId', async (req, res, next) => {
+  try {
+    const catalogId = req.params.catalogId;
+
+    const found = await prisma.curriculumCatalog.findUnique({
+      where: { id: catalogId }
+    });
+
+    if (!found) {
+      res.status(404).json({ message: '삭제할 전공교육과정을 찾을 수 없습니다.' });
+      return;
+    }
+
+    await prisma.$transaction([
+      prisma.requiredCourse.deleteMany({
+        where: { catalogId }
+      }),
+      prisma.graduationRequirement.deleteMany({
+        where: { catalogId }
+      }),
+      prisma.curriculumCatalog.delete({
+        where: { id: catalogId }
+      })
+    ]);
+
+    res.json({ ok: true, id: catalogId });
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.post('/catalogs/import', async (req, res, next) => {
   try {
     const { year, major, notes, sourceId, sourceUrl, courses, graduationRequirements } = req.body as {
@@ -247,6 +282,34 @@ router.get('/completed-sets/:setId', async (req, res, next) => {
   }
 });
 
+router.delete('/completed-sets/:setId', async (req, res, next) => {
+  try {
+    const setId = req.params.setId;
+
+    const found = await prisma.completedCourseSet.findUnique({
+      where: { id: setId }
+    });
+
+    if (!found) {
+      res.status(404).json({ message: '삭제할 이수내역 세트를 찾을 수 없습니다.' });
+      return;
+    }
+
+    await prisma.$transaction([
+      prisma.completedCourse.deleteMany({
+        where: { setId }
+      }),
+      prisma.completedCourseSet.delete({
+        where: { id: setId }
+      })
+    ]);
+
+    res.json({ ok: true, id: setId });
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.post('/completed-sets/import', async (req, res, next) => {
   try {
     const { title, studentName, studentNo, notes, courses } = req.body as {
@@ -299,11 +362,15 @@ router.post('/compare', async (req, res, next) => {
     };
 
     let normalizedRequired: CourseInput[] = [];
+    let normalizedGraduationRequirements: GraduationRequirementInput[] = [];
 
     if (catalogId) {
       const catalog = await prisma.curriculumCatalog.findUnique({
         where: { id: catalogId },
-        include: { courses: true }
+        include: {
+          courses: true,
+          graduationRequirements: true
+        }
       });
 
       if (!catalog) {
@@ -323,8 +390,15 @@ router.post('/compare', async (req, res, next) => {
         semesterOrder: course.semesterOrder,
         termText: course.semesterText
       }));
+
+      normalizedGraduationRequirements = catalog.graduationRequirements.map((item) => ({
+        label: item.label,
+        credits: item.credits
+      }));
     } else if (Array.isArray(requiredCourses)) {
-      normalizedRequired = requiredCourses.map((course) => normalizeRequiredCourse(course)).filter((course) => course.name);
+      normalizedRequired = requiredCourses
+        .map((course) => normalizeRequiredCourse(course))
+        .filter((course) => course.name);
     }
 
     let normalizedCompleted: CourseInput[] = [];
@@ -354,7 +428,9 @@ router.post('/compare', async (req, res, next) => {
         professor: course.professor
       }));
     } else if (Array.isArray(completedCourses)) {
-      normalizedCompleted = completedCourses.map((course) => normalizeCompletedCourse(course)).filter((course) => course.name);
+      normalizedCompleted = completedCourses
+        .map((course) => normalizeCompletedCourse(course))
+        .filter((course) => course.name);
     }
 
     if (normalizedRequired.length === 0) {
@@ -367,7 +443,7 @@ router.post('/compare', async (req, res, next) => {
       return;
     }
 
-    res.json(compareCourses(normalizedRequired, normalizedCompleted));
+    res.json(compareCourses(normalizedRequired, normalizedCompleted, normalizedGraduationRequirements));
   } catch (error) {
     next(error);
   }

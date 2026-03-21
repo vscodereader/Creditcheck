@@ -1,7 +1,5 @@
-import { normalizeCourseCode, normalizeText } from './normalize.js';
-
 export type CourseInput = {
-  id?: string | null;
+  id?: string;
   courseCode?: string | null;
   name: string;
   credit?: number | null;
@@ -14,188 +12,540 @@ export type CourseInput = {
   termText?: string | null;
   gradeText?: string | null;
   professor?: string | null;
-  isRequired?: boolean;
 };
 
-export type CompareCourseRow = {
-  id: string;
-  sourceCourseId?: string | null;
-  yearLabel: string;
-  termLabel: string;
+export type GraduationRequirementInput = {
+  label: string;
+  credits?: number | null;
+};
+
+export type CompareTableRow = {
+  id?: string;
+  yearText: string;
+  termText: string;
   classification1: string;
   classification2: string;
   name: string;
   credit: number | null;
   gradeText: string;
   professor: string;
-  matchedBy?: 'courseCode' | 'courseName';
+};
+
+export type CompareBucket = {
+  title: string;
+  headline: string;
+  subline: string;
+  earnedCredits: number;
+  requiredCredits: number | null;
+  remainingCredits: number | null;
+  rows: CompareTableRow[];
 };
 
 export type CompareResult = {
   summary: {
-    coreRequiredCourses: number;
-    matchedCoreCourses: number;
-    missingCoreCourses: number;
-    matchedSelectiveCourses: number;
-    extraCompletedCourses: number;
+    earnedCredits: number;
+    requiredCredits: number | null;
+    headline: string;
+    expressionText: string;
   };
-  matchedCore: CompareCourseRow[];
-  missingCore: CompareCourseRow[];
-  matchedSelective: CompareCourseRow[];
-  extraCompleted: CompareCourseRow[];
+  buckets: {
+    majorCoreLiberal: CompareBucket;
+    majorRequired: CompareBucket;
+    majorSelective: CompareBucket;
+    basicLiberal: CompareBucket;
+    fusionLiberal: CompareBucket;
+    missing: CompareBucket;
+    extraLiberal: CompareBucket;
+    extraMajorRequired: CompareBucket;
+    extraMajorSelective: CompareBucket;
+    extraOther: CompareBucket;
+  };
 };
 
-const CORE_CLASSIFICATIONS = new Set(['기초교양', '계열교양', '전공필수']);
-const SELECTIVE_CLASSIFICATIONS = new Set(['전공선택']);
-
-type IndexedCompletedCourse = {
-  original: CourseInput;
-  codeKey: string;
-  nameKey: string;
+type CompletedItem = CourseInput & {
+  _normalizedName: string;
+  _used: boolean;
+  _classification1: string;
+  _classification2: string;
 };
 
-export function compareCourses(requiredCourses: CourseInput[], completedCourses: CourseInput[]): CompareResult {
-  const indexedCompleted = completedCourses.map((course) => ({
-    original: course,
-    codeKey: normalizeCourseCode(course.courseCode),
-    nameKey: normalizeText(course.name)
-  }));
+type RequiredItem = CourseInput & {
+  _normalizedName: string;
+  _classification1: string;
+  _classification2: string;
+};
 
-  const usedCompleted = new Set<number>();
-  const matchedCore: CompareCourseRow[] = [];
-  const matchedSelective: CompareCourseRow[] = [];
-  const missingCore: CompareCourseRow[] = [];
+const MAJOR_BUCKET_CLASSIFICATIONS = ['기초교양', '융합교양', '계열교양', '전공필수', '전공선택'] as const;
 
-  const sortedRequired = [...requiredCourses].sort(sortRequiredCourses);
-
-  for (const requiredCourse of sortedRequired) {
-    const class1 = (requiredCourse.classification1 ?? '').trim();
-    const isCore = CORE_CLASSIFICATIONS.has(class1);
-    const isSelective = SELECTIVE_CLASSIFICATIONS.has(class1);
-
-    if (!isCore && !isSelective) {
-      continue;
-    }
-
-    const match = findBestMatch(requiredCourse, indexedCompleted, usedCompleted);
-    if (match) {
-      usedCompleted.add(match.index);
-      const row = toMatchedRow(requiredCourse, match.course, match.matchedBy);
-      if (isCore) matchedCore.push(row);
-      if (isSelective) matchedSelective.push(row);
-      continue;
-    }
-
-    if (isCore) {
-      missingCore.push(toMissingRow(requiredCourse));
-    }
-  }
-
-  const extraCompleted = indexedCompleted
-    .filter((_, index) => !usedCompleted.has(index))
-    .map(({ original }) => toExtraRow(original))
-    .sort(sortCompareRows);
-
-  return {
-    summary: {
-      coreRequiredCourses: matchedCore.length + missingCore.length,
-      matchedCoreCourses: matchedCore.length,
-      missingCoreCourses: missingCore.length,
-      matchedSelectiveCourses: matchedSelective.length,
-      extraCompletedCourses: extraCompleted.length
-    },
-    matchedCore: matchedCore.sort(sortCompareRows),
-    missingCore: missingCore.sort(sortCompareRows),
-    matchedSelective: matchedSelective.sort(sortCompareRows),
-    extraCompleted
-  };
+function normalizeText(value: string | null | undefined): string {
+  return String(value ?? '')
+    .toLowerCase()
+    .replace(/\([^)]*\)/g, '')
+    .replace(/\[[^\]]*\]/g, '')
+    .replace(/\{[^}]*\}/g, '')
+    .replace(/<[^>]*>/g, '')
+    .replace(/[·•ㆍ]/g, '')
+    .replace(/[.,/#!$%^&*;:{}=\-_`~()'"?\\|[\]\s]/g, '')
+    .trim();
 }
 
-function findBestMatch(requiredCourse: CourseInput, indexedCompleted: IndexedCompletedCourse[], usedCompleted: Set<number>) {
-  const requiredCode = normalizeCourseCode(requiredCourse.courseCode);
-  const requiredName = normalizeText(requiredCourse.name);
-
-  if (requiredCode) {
-    const byCodeIndex = indexedCompleted.findIndex((course, index) => !usedCompleted.has(index) && course.codeKey && course.codeKey === requiredCode);
-    if (byCodeIndex >= 0) {
-      return { index: byCodeIndex, course: indexedCompleted[byCodeIndex].original, matchedBy: 'courseCode' as const };
-    }
-  }
-
-  if (requiredName) {
-    const byNameIndex = indexedCompleted.findIndex((course, index) => !usedCompleted.has(index) && course.nameKey && course.nameKey === requiredName);
-    if (byNameIndex >= 0) {
-      return { index: byNameIndex, course: indexedCompleted[byNameIndex].original, matchedBy: 'courseName' as const };
-    }
-  }
-
-  return null;
+function cleanClassification1(value: string | null | undefined): string {
+  return String(value ?? '').trim();
 }
 
-function toMatchedRow(requiredCourse: CourseInput, completedCourse: CourseInput, matchedBy: 'courseCode' | 'courseName'): CompareCourseRow {
-  return {
-    id: `${requiredCourse.id ?? requiredCourse.name}-${completedCourse.id ?? completedCourse.name}`,
-    sourceCourseId: requiredCourse.id ?? null,
-    yearLabel: requiredCourse.yearLevel != null ? String(requiredCourse.yearLevel) : '',
-    termLabel: requiredCourse.semesterOrder != null ? String(requiredCourse.semesterOrder) : '',
-    classification1: (requiredCourse.classification1 ?? '').trim(),
-    classification2: (requiredCourse.classification2 ?? '').trim(),
-    name: requiredCourse.name,
-    credit: requiredCourse.credit ?? completedCourse.credit ?? null,
-    gradeText: (completedCourse.gradeText ?? '').trim(),
-    professor: (completedCourse.professor ?? '').trim(),
-    matchedBy
-  };
+function cleanClassification2(value: string | null | undefined): string {
+  const v = String(value ?? '').trim();
+  return v === '인필' || v === '인선' ? v : '';
 }
 
-function toMissingRow(requiredCourse: CourseInput): CompareCourseRow {
+function toNumber(value: number | null | undefined): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
+}
+
+function termRank(value: string): number {
+  const text = String(value ?? '').replace(/\s+/g, '');
+  if (!text) return 99;
+  if (text.includes('1학기')) return 1;
+  if (text.includes('여름')) return 2;
+  if (text.includes('2학기')) return 3;
+  if (text.includes('겨울')) return 4;
+
+  const numeric = Number(text);
+  return Number.isFinite(numeric) ? numeric : 99;
+}
+
+function sortRows(rows: CompareTableRow[]): CompareTableRow[] {
+  return [...rows].sort((a, b) => {
+    const yearA = Number(a.yearText);
+    const yearB = Number(b.yearText);
+    const yearDiff = (Number.isFinite(yearA) ? yearA : 9999) - (Number.isFinite(yearB) ? yearB : 9999);
+    if (yearDiff !== 0) return yearDiff;
+
+    const termDiff = termRank(a.termText) - termRank(b.termText);
+    if (termDiff !== 0) return termDiff;
+
+    return a.name.localeCompare(b.name, 'ko');
+  });
+}
+
+function uniqueRows(rows: CompareTableRow[]): CompareTableRow[] {
+  const seen = new Set<string>();
+  const result: CompareTableRow[] = [];
+
+  for (const row of rows) {
+    const key = [
+      row.yearText,
+      row.termText,
+      row.classification1,
+      row.classification2,
+      normalizeText(row.name),
+      row.credit ?? '',
+      row.gradeText,
+      row.professor
+    ].join('|');
+
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(row);
+  }
+
+  return sortRows(result);
+}
+
+function sumCredits(rows: CompareTableRow[]): number {
+  return rows.reduce((sum, row) => sum + toNumber(row.credit), 0);
+}
+
+function isGenericPlaceholder(course: RequiredItem): boolean {
+  if (!MAJOR_BUCKET_CLASSIFICATIONS.includes(course._classification1 as (typeof MAJOR_BUCKET_CLASSIFICATIONS)[number])) {
+    return false;
+  }
+
+  if (!course._normalizedName) return false;
+  return course._normalizedName === normalizeText(course._classification1);
+}
+
+function uniqueRequiredComparableCourses(courses: RequiredItem[]): RequiredItem[] {
+  const seen = new Set<string>();
+  const result: RequiredItem[] = [];
+
+  for (const course of courses) {
+    if (!course._normalizedName) continue;
+    if (isGenericPlaceholder(course)) continue;
+
+    const key = [course._classification1, course._classification2, course._normalizedName].join('|');
+    if (seen.has(key)) continue;
+
+    seen.add(key);
+    result.push(course);
+  }
+
+  return result;
+}
+
+function buildRequiredRow(course: RequiredItem): CompareTableRow {
   return {
-    id: String(requiredCourse.id ?? requiredCourse.name),
-    sourceCourseId: requiredCourse.id ?? null,
-    yearLabel: requiredCourse.yearLevel != null ? String(requiredCourse.yearLevel) : '',
-    termLabel: requiredCourse.semesterOrder != null ? String(requiredCourse.semesterOrder) : '',
-    classification1: (requiredCourse.classification1 ?? '').trim(),
-    classification2: (requiredCourse.classification2 ?? '').trim(),
-    name: requiredCourse.name,
-    credit: requiredCourse.credit ?? null,
+    id: course.id,
+    yearText: course.yearLevel ? String(course.yearLevel) : '',
+    termText: course.semesterOrder ? `${course.semesterOrder}` : '',
+    classification1: course._classification1,
+    classification2: course._classification2,
+    name: course.name,
+    credit: course.credit ?? null,
     gradeText: '',
     professor: ''
   };
 }
 
-function toExtraRow(completedCourse: CourseInput): CompareCourseRow {
+function buildMatchedRow(required: RequiredItem, completed: CompletedItem): CompareTableRow {
   return {
-    id: String(completedCourse.id ?? completedCourse.name),
-    sourceCourseId: completedCourse.id ?? null,
-    yearLabel: completedCourse.yearTaken != null ? String(completedCourse.yearTaken) : '',
-    termLabel: (completedCourse.termText ?? '').trim(),
-    classification1: (completedCourse.classification1 ?? '').trim(),
-    classification2: (completedCourse.classification2 ?? '').trim(),
-    name: completedCourse.name,
-    credit: completedCourse.credit ?? null,
-    gradeText: (completedCourse.gradeText ?? '').trim(),
-    professor: (completedCourse.professor ?? '').trim()
+    id: required.id ?? completed.id,
+    yearText: completed.yearTaken ? String(completed.yearTaken) : '',
+    termText: String(completed.termText ?? '').trim(),
+    classification1: required._classification1,
+    classification2: required._classification2,
+    name: required.name,
+    credit: required.credit ?? completed.credit ?? null,
+    gradeText: String(completed.gradeText ?? '').trim(),
+    professor: String(completed.professor ?? '').trim()
   };
 }
 
-function sortRequiredCourses(a: CourseInput, b: CourseInput): number {
-  const yearDiff = (a.yearLevel ?? 999) - (b.yearLevel ?? 999);
-  if (yearDiff !== 0) return yearDiff;
-  const semesterDiff = (a.semesterOrder ?? 999) - (b.semesterOrder ?? 999);
-  if (semesterDiff !== 0) return semesterDiff;
-  return a.name.localeCompare(b.name, 'ko');
+function buildCompletedRow(course: CompletedItem): CompareTableRow {
+  return {
+    id: course.id,
+    yearText: course.yearTaken ? String(course.yearTaken) : '',
+    termText: String(course.termText ?? '').trim(),
+    classification1: course._classification1,
+    classification2: course._classification2,
+    name: course.name,
+    credit: course.credit ?? null,
+    gradeText: String(course.gradeText ?? '').trim(),
+    professor: String(course.professor ?? '').trim()
+  };
 }
 
-function sortCompareRows(a: CompareCourseRow, b: CompareCourseRow): number {
-  const yearA = parseInt(a.yearLabel, 10);
-  const yearB = parseInt(b.yearLabel, 10);
-  const yearDiff = (Number.isFinite(yearA) ? yearA : 999) - (Number.isFinite(yearB) ? yearB : 999);
-  if (yearDiff !== 0) return yearDiff;
+function findRequirementCredit(
+  requirements: GraduationRequirementInput[],
+  label: '기초교양' | '융합교양' | '계열교양' | '전공필수' | '전공선택' | '총학점'
+): number | null {
+  const found = requirements.find((item) => item.label === label);
+  if (!found) return null;
+  return typeof found.credits === 'number' && Number.isFinite(found.credits) ? found.credits : null;
+}
 
-  const termA = parseInt(a.termLabel, 10);
-  const termB = parseInt(b.termLabel, 10);
-  const termDiff = (Number.isFinite(termA) ? termA : 999) - (Number.isFinite(termB) ? termB : 999);
-  if (termDiff !== 0) return termDiff;
+function buildProgressBucket(args: {
+  title: string;
+  shortLabel: string;
+  rows: CompareTableRow[];
+  requiredCredits: number | null;
+  isExtra?: boolean;
+}): CompareBucket {
+  const rows = uniqueRows(args.rows);
+  const earnedCredits = sumCredits(rows);
+  const requiredCredits = args.requiredCredits ?? null;
+  const remainingCredits = requiredCredits === null ? null : Math.max(0, requiredCredits - earnedCredits);
 
-  return a.name.localeCompare(b.name, 'ko');
+  let headline = '';
+  let subline = '';
+
+  if (args.title === '미이수') {
+    headline = `과목 수 : ${rows.length}`;
+  } else if (args.isExtra) {
+    headline = `들은 학점 총합 : ${earnedCredits}`;
+  } else if (requiredCredits === null) {
+    headline = `${earnedCredits} / -`;
+  } else {
+    headline = `${earnedCredits} / ${requiredCredits}`;
+    subline =
+      remainingCredits > 0
+        ? `${args.shortLabel} ${remainingCredits}학점 더 들으셔야 해요!`
+        : `${args.shortLabel} 충족 완료!`;
+  }
+
+  return {
+    title: args.title,
+    headline,
+    subline,
+    earnedCredits,
+    requiredCredits,
+    remainingCredits,
+    rows
+  };
+}
+
+function makeCompletedItems(courses: CourseInput[]): CompletedItem[] {
+  return courses.map((course) => ({
+    ...course,
+    _classification1: cleanClassification1(course.classification1),
+    _classification2: cleanClassification2(course.classification2),
+    _normalizedName: normalizeText(course.name),
+    _used: false
+  }));
+}
+
+function makeRequiredItems(courses: CourseInput[]): RequiredItem[] {
+  return courses.map((course) => ({
+    ...course,
+    _classification1: cleanClassification1(course.classification1),
+    _classification2: cleanClassification2(course.classification2),
+    _normalizedName: normalizeText(course.name)
+  }));
+}
+
+function matchRequiredCourses(
+  requiredCourses: RequiredItem[],
+  completedCourses: CompletedItem[]
+): {
+  matchedRows: CompareTableRow[];
+  missingRows: CompareTableRow[];
+} {
+  const matchedRows: CompareTableRow[] = [];
+  const missingRows: CompareTableRow[] = [];
+
+  for (const required of requiredCourses) {
+    const match = completedCourses.find(
+      (completed) => !completed._used && completed._normalizedName !== '' && completed._normalizedName === required._normalizedName
+    );
+
+    if (match) {
+      match._used = true;
+      matchedRows.push(buildMatchedRow(required, match));
+    } else {
+      missingRows.push(buildRequiredRow(required));
+    }
+  }
+
+  return {
+    matchedRows: uniqueRows(matchedRows),
+    missingRows: uniqueRows(missingRows)
+  };
+}
+
+function takeRemainingByPredicate(
+  completedCourses: CompletedItem[],
+  predicate: (course: CompletedItem) => boolean
+): CompareTableRow[] {
+  const rows: CompareTableRow[] = [];
+
+  for (const course of completedCourses) {
+    if (course._used) continue;
+    if (!predicate(course)) continue;
+
+    course._used = true;
+    rows.push(buildCompletedRow(course));
+  }
+
+  return uniqueRows(rows);
+}
+
+function isLiberalCourse(classification1: string): boolean {
+  return classification1.includes('교양');
+}
+
+function buildExpression(values: {
+  majorCoreLiberal: number;
+  majorRequired: number;
+  majorSelective: number;
+  basicLiberal: number;
+  fusionLiberal: number;
+  extraLiberal: number;
+  extraMajorRequired: number;
+  extraMajorSelective: number;
+  extraOther: number;
+}): string {
+  const missing = 0;
+
+  return `(${values.majorCoreLiberal} + ${values.majorRequired} + ${values.majorSelective}) + ${values.basicLiberal} + ${values.fusionLiberal} + ${missing} + ${values.extraLiberal} + ${values.extraMajorRequired} + ${values.extraMajorSelective} + ${values.extraOther}`;
+}
+
+export function compareCourses(
+  requiredCoursesInput: CourseInput[],
+  completedCoursesInput: CourseInput[],
+  graduationRequirements: GraduationRequirementInput[] = []
+): CompareResult {
+  const requiredCourses = makeRequiredItems(requiredCoursesInput);
+  const completedCourses = makeCompletedItems(completedCoursesInput);
+
+  const requiredMajorCore = uniqueRequiredComparableCourses(requiredCourses.filter((course) => course._classification1 === '계열교양'));
+  const requiredMajorRequired = uniqueRequiredComparableCourses(requiredCourses.filter((course) => course._classification1 === '전공필수'));
+  const requiredMajorSelective = uniqueRequiredComparableCourses(requiredCourses.filter((course) => course._classification1 === '전공선택'));
+  const requiredBasic = uniqueRequiredComparableCourses(requiredCourses.filter((course) => course._classification1 === '기초교양'));
+  const requiredFusion = uniqueRequiredComparableCourses(requiredCourses.filter((course) => course._classification1 === '융합교양'));
+
+  const majorCoreMatch = matchRequiredCourses(requiredMajorCore, completedCourses);
+  const majorRequiredMatch = matchRequiredCourses(requiredMajorRequired, completedCourses);
+  const majorSelectiveMatch = matchRequiredCourses(requiredMajorSelective, completedCourses);
+  const basicMatch = matchRequiredCourses(requiredBasic, completedCourses);
+  const fusionMatch = matchRequiredCourses(requiredFusion, completedCourses);
+
+  const extraBasicRows = takeRemainingByPredicate(completedCourses, (course) => course._classification1 === '기초교양');
+  const extraFusionRows = takeRemainingByPredicate(completedCourses, (course) => course._classification1 === '융합교양');
+
+  const basicRows = uniqueRows([...basicMatch.matchedRows, ...extraBasicRows]);
+  const fusionRows = uniqueRows([...fusionMatch.matchedRows, ...extraFusionRows]);
+
+  const majorCoreRequiredCredits = findRequirementCredit(graduationRequirements, '계열교양');
+  const majorRequiredCredits = findRequirementCredit(graduationRequirements, '전공필수');
+  const majorSelectiveCredits = findRequirementCredit(graduationRequirements, '전공선택');
+  const basicRequiredCredits = findRequirementCredit(graduationRequirements, '기초교양');
+  const fusionRequiredCredits = findRequirementCredit(graduationRequirements, '융합교양');
+  const totalRequiredCredits = findRequirementCredit(graduationRequirements, '총학점');
+
+  const majorCoreBucket = buildProgressBucket({
+    title: '이수과목 - 계열교양 (제1학과)',
+    shortLabel: '계교',
+    rows: majorCoreMatch.matchedRows,
+    requiredCredits: majorCoreRequiredCredits
+  });
+
+  const majorRequiredBucket = buildProgressBucket({
+    title: '이수과목 - 전공필수 (제1학과)',
+    shortLabel: '전필',
+    rows: majorRequiredMatch.matchedRows,
+    requiredCredits: majorRequiredCredits
+  });
+
+  const majorSelectiveBucket = buildProgressBucket({
+    title: '이수과목 - 전공선택 (제1학과)',
+    shortLabel: '전선',
+    rows: majorSelectiveMatch.matchedRows,
+    requiredCredits: majorSelectiveCredits
+  });
+
+  const basicBucket = buildProgressBucket({
+    title: '기초교양',
+    shortLabel: '기초',
+    rows: basicRows,
+    requiredCredits: basicRequiredCredits
+  });
+
+  const fusionBucket = buildProgressBucket({
+    title: '융합교양',
+    shortLabel: '융합',
+    rows: fusionRows,
+    requiredCredits: fusionRequiredCredits
+  });
+
+  const missingRows: CompareTableRow[] = [];
+
+  if ((majorCoreBucket.remainingCredits ?? 0) > 0) {
+    missingRows.push(...majorCoreMatch.missingRows);
+  }
+  if ((majorRequiredBucket.remainingCredits ?? 0) > 0) {
+    missingRows.push(...majorRequiredMatch.missingRows);
+  }
+  if ((majorSelectiveBucket.remainingCredits ?? 0) > 0) {
+    missingRows.push(...majorSelectiveMatch.missingRows);
+  }
+  if ((basicBucket.remainingCredits ?? 0) > 0) {
+    missingRows.push(...basicMatch.missingRows);
+  }
+  if ((fusionBucket.remainingCredits ?? 0) > 0) {
+    missingRows.push(...fusionMatch.missingRows);
+  }
+
+  const extraLiberalRows = takeRemainingByPredicate(
+    completedCourses,
+    (course) => isLiberalCourse(course._classification1)
+  );
+
+  const extraMajorRequiredRows = takeRemainingByPredicate(
+    completedCourses,
+    (course) => course._classification1 === '전공필수'
+  );
+
+  const extraMajorSelectiveRows = takeRemainingByPredicate(
+    completedCourses,
+    (course) => course._classification1 === '전공선택'
+  );
+
+  const extraOtherRows = takeRemainingByPredicate(
+    completedCourses,
+    () => true
+  );
+
+  const missingBucket = buildProgressBucket({
+    title: '미이수',
+    shortLabel: '미이수',
+    rows: missingRows,
+    requiredCredits: null,
+    isExtra: true
+  });
+
+  const extraLiberalBucket = buildProgressBucket({
+    title: '추가이수교양',
+    shortLabel: '추가교양',
+    rows: extraLiberalRows,
+    requiredCredits: null,
+    isExtra: true
+  });
+
+  const extraMajorRequiredBucket = buildProgressBucket({
+    title: '추가 이수 전공(전공필수)',
+    shortLabel: '추가전필',
+    rows: extraMajorRequiredRows,
+    requiredCredits: null,
+    isExtra: true
+  });
+
+  const extraMajorSelectiveBucket = buildProgressBucket({
+    title: '추가 이수 전공(전공선택)',
+    shortLabel: '추가전선',
+    rows: extraMajorSelectiveRows,
+    requiredCredits: null,
+    isExtra: true
+  });
+
+  const extraOtherBucket = buildProgressBucket({
+    title: '그외 추가이수과목',
+    shortLabel: '기타',
+    rows: extraOtherRows,
+    requiredCredits: null,
+    isExtra: true
+  });
+
+  const earnedCredits =
+    majorCoreBucket.earnedCredits +
+    majorRequiredBucket.earnedCredits +
+    majorSelectiveBucket.earnedCredits +
+    basicBucket.earnedCredits +
+    fusionBucket.earnedCredits +
+    extraLiberalBucket.earnedCredits +
+    extraMajorRequiredBucket.earnedCredits +
+    extraMajorSelectiveBucket.earnedCredits +
+    extraOtherBucket.earnedCredits;
+
+  const expressionText = buildExpression({
+    majorCoreLiberal: majorCoreBucket.earnedCredits,
+    majorRequired: majorRequiredBucket.earnedCredits,
+    majorSelective: majorSelectiveBucket.earnedCredits,
+    basicLiberal: basicBucket.earnedCredits,
+    fusionLiberal: fusionBucket.earnedCredits,
+    extraLiberal: extraLiberalBucket.earnedCredits,
+    extraMajorRequired: extraMajorRequiredBucket.earnedCredits,
+    extraMajorSelective: extraMajorSelectiveBucket.earnedCredits,
+    extraOther: extraOtherBucket.earnedCredits
+  });
+
+  return {
+    summary: {
+      earnedCredits,
+      requiredCredits: totalRequiredCredits,
+      headline: totalRequiredCredits === null ? `${earnedCredits} / -` : `${earnedCredits} / ${totalRequiredCredits}`,
+      expressionText
+    },
+    buckets: {
+      majorCoreLiberal: majorCoreBucket,
+      majorRequired: majorRequiredBucket,
+      majorSelective: majorSelectiveBucket,
+      basicLiberal: basicBucket,
+      fusionLiberal: fusionBucket,
+      missing: missingBucket,
+      extraLiberal: extraLiberalBucket,
+      extraMajorRequired: extraMajorRequiredBucket,
+      extraMajorSelective: extraMajorSelectiveBucket,
+      extraOther: extraOtherBucket
+    }
+  };
 }
