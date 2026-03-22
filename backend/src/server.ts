@@ -2,30 +2,75 @@ import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 import morgan from 'morgan';
+import session from 'express-session';
+import connectPgSimple from 'connect-pg-simple';
+import pg from 'pg';
 import apiRouter from './routes/api.js';
+import authRouter from './routes/auth.js';
+import passport from './auth/passport.js';
 
 const app = express();
+const PORT = Number(process.env.PORT || 4000);
+const clientUrl = process.env.CLIENT_URL ?? 'http://localhost:5173';
+const sessionSecret = process.env.SESSION_SECRET;
 
-const PORT = Number(process.env.PORT ?? 4000);
-const CLIENT_URL = process.env.CLIENT_URL ?? 'http://localhost:5173';
+if (!process.env.DATABASE_URL) {
+  throw new Error('DATABASE_URL 환경변수가 필요합니다.');
+}
 
-const allowedOrigins = [CLIENT_URL, 'http://localhost:5173'];
+if (!sessionSecret) {
+  throw new Error('SESSION_SECRET 환경변수가 필요합니다.');
+}
+
+const isProduction = process.env.NODE_ENV === 'production';
+const PgSession = connectPgSimple(session);
+const pgPool = new pg.Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: isProduction ? { rejectUnauthorized: false } : false
+});
+
+app.set('trust proxy', 1);
 
 app.use(
   cors({
-    origin: allowedOrigins,
-    credentials: false
+    origin: clientUrl,
+    credentials: true
   })
 );
 
 app.use(express.json({ limit: '35mb' }));
 app.use(morgan('dev'));
 
+app.use(
+  session({
+    store: new PgSession({
+      pool: pgPool,
+      tableName: 'user_sessions',
+      createTableIfMissing: true
+    }),
+    name: 'coursechecker.sid',
+    secret: sessionSecret,
+    resave: false,
+    saveUninitialized: false,
+    cookie: {
+      httpOnly: true,
+      secure: isProduction,
+      sameSite: isProduction ? 'none' : 'lax',
+      maxAge: 1000 * 60 * 60 * 24 * 7
+    }
+  })
+);
+
+app.use(passport.initialize());
+app.use(passport.session());
+
 app.get('/', (_req, res) => {
   res.json({
     message: 'Gachon Course Checker API',
     docs: {
       health: '/api/health',
+      authMe: '/api/auth/me',
+      authGoogle: '/api/auth/google',
       gachonSources: '/api/sources/gachon?category=major',
       aiCurriculumOcr: '/api/ai-ocr/curriculum',
       aiCompletedOcr: '/api/ai-ocr/completed',
@@ -36,6 +81,7 @@ app.get('/', (_req, res) => {
   });
 });
 
+app.use('/api/auth', authRouter);
 app.use('/api', apiRouter);
 
 app.use((err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {

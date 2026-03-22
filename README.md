@@ -112,4 +112,3 @@ DIRECT_URL="postgresql://YOUR_DIRECT_DATABASE_URL"
 OPENAI_API_KEY="your_openai_api_key"
 OPENAI_MODEL="gpt-5.4-mini"
 OPENAI_BUDGET_USD="5"
-
