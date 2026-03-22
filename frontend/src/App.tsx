@@ -26,7 +26,7 @@ import {
   type RequiredCourseRow
 } from './ocrUtils';
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:4000/api';
+const API_BASE = import.meta.env.VITE_API_BASE ?? 'http://localhost:4000/api';
 const SOURCE_PAGE_SIZE = 5;
 
 type SourceItem = {
@@ -1947,8 +1947,12 @@ function rebuildCompareBucket(bucket: CompareBucket, rows: CompareTableRow[]): C
     headline = `들은 학점 총합 : ${earnedCredits}`;
   } else {
     headline = `${earnedCredits} / ${requiredCredits}`;
-    subline =
-      remainingCredits > 0 ? `${shortLabel} ${remainingCredits}학점 더 들으셔야 해요!` : `${shortLabel} 충족 완료!`;
+
+    if (remainingCredits !== null && remainingCredits > 0) {
+      subline = `${shortLabel} ${remainingCredits}학점 더 들으셔야 해요!`;
+    } else {
+      subline = `${shortLabel} 충족 완료!`;
+    }
   }
 
   return {
