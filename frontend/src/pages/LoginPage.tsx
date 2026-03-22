@@ -11,7 +11,9 @@ function LoginPage() {
   }, [refreshMe]);
 
   useEffect(() => {
-    if (!loading && authenticated) {
+    if (loading) return;
+
+    if (authenticated) {
       navigate(user?.profileCompleted ? '/check' : '/profile-setup', { replace: true });
     }
   }, [loading, authenticated, user, navigate]);

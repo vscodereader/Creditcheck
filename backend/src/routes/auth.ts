@@ -14,7 +14,7 @@ router.get(
     failureRedirect: `${clientUrl}/login?error=google`
   }),
   (_req, res) => {
-    res.redirect(`${clientUrl}/login`);
+    res.redirect(`${clientUrl}/main`);
   }
 );
 
